@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 
 """
@@ -17,45 +16,49 @@ Usage:
 # ----------------------------------
 
 
-def load_exog_data(file_path, nwp, variables, lead_times):
+def load_exog_data(file_path, nwp, variables, lead_times, datetime_col_index=0):
     """Load exogenous data from a CSV file."""
-    dfs = {}
+    dfs = {var: {} for var in variables}
     for var in variables:
         for lead_time in lead_times:
             if lead_time not in [24, 48, 72, 96, 120]:
                 raise ValueError(f"Lead time {lead_time} is not recognized.")
-            df = pd.read_csv(f"{file_path}/{nwp}_{var}_{lead_time}.csv")
+            df = pd.read_csv(f"{file_path}/clean_{nwp}_{var}_lead_{lead_time}h.csv", parse_dates=[datetime_col_index], dayfirst=True, index_col=datetime_col_index)
             dfs[var][lead_time] = df
     return dfs
 
 
-def load_target_data(file_path, target):
+def load_target_data(file_path, target, datetime_col_index=0):
     """Load target data from a CSV file."""
     if target not in ['Q', 'H']:
         raise ValueError(f"Target {target} is not recognized.")
-    df = pd.read_csv(f"{file_path}/{target}.csv")
+    df = pd.read_csv(f"{file_path}/{target}.csv", parse_dates=[datetime_col_index], dayfirst=True, index_col=datetime_col_index)
     return df
 
 
-def clean_data(df, datetime_col_index):
+def clean_data(df):
     """Clean the data by removing duplicates and handling missing values."""
-    df = df.drop_duplicates() 
-    df = df.dropna() 
-    dt = pd.to_datetime(df.iloc[:, datetime_col_index], dayfirst=True)
-    df = df[~dt.isna()]  # Remove rows where date conversion failed
-    df.index = df.index.tz_localize(None)
+    df.index = pd.to_datetime(df.index, errors='coerce')
+    df = df[~df.index.isna()]  # Remove rows where date conversion failed
+    df = df[~df.index.duplicated(keep='first')]
+    df = df.dropna().sort_index()
     df.index.name = 'datetime'
     return df
 
 
 def sync_data(exog_dfs, target):
     """Synchronize exogenous and target data on the datetime index."""
-    for item in exog_dfs.values():
-        common = target.index.intersection(item.index)
-        target = target.loc[common]
-        item = item.loc[common]
+    common = target.index
+    for _, horizon in exog_dfs.items():
+        for _, df in horizon.items():
+            common = common.intersection(df.index)
+    # Apply the common index
+    for var, horizon in exog_dfs.items():
+        for h, df in horizon.items():
+            exog_dfs[var][h] = df.loc[common]
+    target = target.loc[common]
     if common.empty:
-        raise ValueError("No common timestamps across target and exogenous data.")
+                raise ValueError("No common timestamps across target and exogenous data.")
     return exog_dfs, target
 
 
@@ -187,9 +190,8 @@ def prepare_data(data, target_scaled, target, lag, horizon, val_index, test_inde
 
 # ----------------------------------- Parameters (to be set as needed) -----------------------------------
 
-# File paths
-exog_file_path = '/data/exogenous'   
-target_file_path = '/data/target/target.csv'
+# File path
+file_path = 'data'   
 
 # Variables and lead times
 DEFAULT_HORIZONS = [24, 48, 72, 96, 120]
@@ -212,8 +214,7 @@ test_start = '2023-01-01'
 def data_prep(
     nwp,
     target,
-    exog_file_path,
-    target_file_path,
+    file_path=file_path,
     vars='Qpt',
     horizons=DEFAULT_HORIZONS,
     lag=3,
@@ -225,31 +226,24 @@ def data_prep(
     """Main function to load, clean, synchronize, merge, and scale data."""
     variables = FEATURE_MAP[vars]['variables']
     # Load data
-    exog_dfs = load_exog_data(exog_file_path, nwp, variables, horizons)
-    target_df = load_target_data(target_file_path, target)
-    print(f"Loaded target data with shape: {target_df.shape}")
-    print(f"Loaded exogenous data for variables: {list(exog_dfs.keys())}")
+    exog_dfs = load_exog_data(file_path, nwp, variables, horizons, datetime_col_index)
+    target_df = load_target_data(file_path, target, datetime_col_index)
+    print(target_df)
 
     # Clean data
     for var in variables:
         for h in horizons:
-            exog_dfs[var][h] = clean_data(exog_dfs[var][h], datetime_col_index)
-    target_df = clean_data(target_df, datetime_col_index)
-    print(f"Cleaned target data with shape: {target_df.shape}")
-    print(f"Cleaned exogenous data for variables: {list(exog_dfs.keys())}")
+            exog_dfs[var][h] = clean_data(exog_dfs[var][h])
+    target_df = clean_data(target_df)
 
     # Synchronize data
     exog_dfs, target_df = sync_data(exog_dfs, target_df)
-    print(f"Synchronized target data with shape: {target_df.shape}")
-    print(f"Synchronized exogenous data for variables: {list(exog_dfs.keys())}")
 
     # Merge exogenous data
     exogs = merge_exog(exog_dfs, variables, horizons, suffix_map)
-    print(f"Merged exogenous data: {exogs}")
 
     # Scale data
-    exog_scaled, endo_scaled = scale_data(exogs, target_df, val_start)
-    print(f"Scaled exogenous data and target data: {exog_scaled}, {endo_scaled}")
+    exog_scaled, endo_scaled, scalers = scale_data(exogs, target_df, val_start)
 
     # Prepare data for modeling
     X_train, y_train, X_val, y_val, X_test, y_test = prepare_data(
@@ -258,10 +252,10 @@ def data_prep(
         target_df,
         lag,
         len(horizons),
-        val_start,
-        test_start,
+        val_index=np.where(exogs[0].index == val_start)[0][0],
+        test_index=np.where(exogs[0].index == test_start)[0][0],
         use_q=FEATURE_MAP[vars]['use_q'],
         seasonality=FEATURE_MAP[vars]['seasonality'],
     )
     print(f"Prepared data shapes - X_train: {X_train.shape}, y_train: {y_train.shape}, X_val: {X_val.shape}, y_val: {y_val.shape}, X_test: {X_test.shape}, y_test: {y_test.shape}")
-    return X_train, y_train, X_val, y_val, X_test, y_test
+    return X_train, y_train, X_val, y_val, X_test, y_test, scalers
