@@ -1,9 +1,8 @@
 import tensorflow as tf
-import pandas as pd
 import numpy as np
-from tensorflow.keras.callbacks import EarlyStopping, Callback
+from keras.callbacks import Callback, ReduceLROnPlateau, TerminateOnNaN
 from keras.models import Sequential
-from keras.layers import LSTM, Dense, Dropout, LayerNormalization, InputLayer
+from keras.layers import LSTM, Dense, Dropout, LayerNormalization, InputLayer, Bidirectional
 from tcn import TCN, tcn_full_summary
 from tkan import TKAN
 from keras.initializers import Orthogonal
@@ -73,33 +72,37 @@ def build_model(input_shape, horizon, model_arch=LSTM, hp={}, layer_hp={}):
     General model builder for multi-step forecasting - works for LSTM, GRU, TCN, TKAN etc.
     """
     model_name = model_arch.__name__
-    if sum(layer_hp.values()) > 0:
+    if len(layer_hp.values()) > 0:
         layer_hp = layer_hp[model_name]
     # Build model
     model = Sequential(name=f'{model_name}_model')
-    model.add(InputLayer(input_shape=input_shape))
+    model.add(InputLayer(shape=input_shape))
     for i in range(hp.get('num_layers', 1)):
         if model_name != 'TCN':
-            units = layer_hp.get('units_l0', 128)
-        kwargs = {k: v for k, v in layer_hp.items() if not k.startswith('units_')}
+            units = layer_hp.get(f'units_l{i}', 128)
+        kwargs = {k: v for k, v in layer_hp.items() if not k.startswith('units_') and k not in ['bidir', 'layer_norm']}
         kwargs['return_sequences'] = True if i < hp.get('num_layers', 1) - 1 else False
-        activation = hp.get('activation', 'relu')
-        cell = model_arch(units, activation, **kwargs)
+        kwargs.setdefault('activation', hp.get('activation', 'relu'))
+        # Add hidden layer
+        if model_name != 'TCN':
+            cell = model_arch(units, **kwargs)
+        else:
+            cell = model_arch(**kwargs)
         if layer_hp.get('bidir', False):
-            cell = tf.keras.layers.Bidirectional(cell)
+            cell = Bidirectional(cell)
         model.add(cell)
         model.add(Dropout(hp.get('dropout_rate', 0.2)))
         if layer_hp.get('layer_norm', True):
             model.add(LayerNormalization())
     model.add(Dense(horizon))
     # Compile the model with Pinball loss
-    optimizer = tf.optimizers.AdamW(learning_rate=hp.get('lr', 0.001), weight_decay=hp.get('wd', 0.0))
+    optimizer = tf.keras.optimizers.AdamW(learning_rate=hp.get('lr', 0.001), weight_decay=hp.get('wd', 0.0), clipnorm=hp.get('cn', 1.0))
     model.compile(optimizer=optimizer, loss=PinballLoss(quantile=hp.get('quantile', 0.5)), metrics=['mae'])
-    print(f'Here is the summary of the model: {model.summary()}')
+    model.summary()
     return model
 
 
-def train_model(model, X_train, y_train, X_val, y_val, epochs=100, batch_size=32, patience=10):
+def train_model(model, X_train, y_train, X_val, y_val, epochs=500, batch_size=32, patience=20):
     """
     Train the model with early stopping and restore best mean loss.
     Args:
@@ -114,14 +117,16 @@ def train_model(model, X_train, y_train, X_val, y_val, epochs=100, batch_size=32
     Returns:
         history: Training history object.
     """
-    early_stopping = EarlyStopping(monitor='val_loss', patience=patience, restore_best_weights=False)
-    restore_best = RestoreBestMeanLoss(patience=patience, start_from_epoch=5)
+    reduce_lr = ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=max(5, patience//2), cooldown=2, verbose=1)
+    restore_best = RestoreBestMeanLoss(patience=patience, start_from_epoch=10)
+    print(X_train.shape, y_train.shape)
     history = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
         epochs=epochs,
         batch_size=batch_size,
-        callbacks=[early_stopping, restore_best],
-        verbose=2
+        shuffle=False,
+        callbacks=[reduce_lr, restore_best, TerminateOnNaN()],
     )
-    return history
+    best_val = np.min(history.history['val_loss'])
+    return history, best_val

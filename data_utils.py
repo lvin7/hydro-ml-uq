@@ -152,39 +152,25 @@ def prepare_data(data, target_scaled, target, lag, horizon, val_index, test_inde
             # output sequence: next `horizon` target values starting from end_ix (end_ix .. end_ix+horizon-1)
             if end_ix + horizon > n:
                     break
-            seq_y = target.iloc[end_ix : end_ix + horizon].values
+            seq_y = target.iloc[end_ix : end_ix + horizon].squeeze()
 
             # assign to split based on end_ix position
-            if end_ix >= test_index:
+            if      end_ix >= test_index:
                     X_test.append(seq_x)
                     y_test.append(seq_y)
-            elif end_ix >= val_index:
+            elif    end_ix >= val_index:
                     X_val.append(seq_x)
                     y_val.append(seq_y)
             else:
                     X_train.append(seq_x)
                     y_train.append(seq_y)
-
-    # convert lists to numpy arrays (object arrays if ragged); prefer to return float arrays if possible
-    def to_numpy(arr_list):
-            if not arr_list:
-                    return np.empty((0,))
-            # check if all shapes equal
-            shapes = [a.shape for a in arr_list]
-            if len(set(shapes)) == 1:
-                    return np.stack(arr_list, axis=0)
-            # ragged -> return object array
-            out = np.empty((len(arr_list),), dtype=object)
-            out[:] = arr_list
-            return out
-
     return (
-            to_numpy(X_train),
-            to_numpy(y_train),
-            to_numpy(X_val),
-            to_numpy(y_val),
-            to_numpy(X_test),
-            to_numpy(y_test),
+            np.array(X_train),
+            np.array(y_train),
+            np.array(X_val),
+            np.array(y_val),
+            np.array(X_test),
+            np.array(y_test),
     )
 
 
@@ -228,7 +214,6 @@ def data_prep(
     # Load data
     exog_dfs = load_exog_data(file_path, nwp, variables, horizons, datetime_col_index)
     target_df = load_target_data(file_path, target, datetime_col_index)
-    print(target_df)
 
     # Clean data
     for var in variables:
@@ -257,5 +242,12 @@ def data_prep(
         use_q=FEATURE_MAP[vars]['use_q'],
         seasonality=FEATURE_MAP[vars]['seasonality'],
     )
-    print(f"Prepared data shapes - X_train: {X_train.shape}, y_train: {y_train.shape}, X_val: {X_val.shape}, y_val: {y_val.shape}, X_test: {X_test.shape}, y_test: {y_test.shape}")
+    print(f'Prepared data shapes -     \n'
+        f'X_train:    {X_train.shape}, \n'
+        f'y_train:    {y_train.shape}, \n'
+        f'X_val:      {X_val.shape},   \n'
+        f'y_val:      {y_val.shape},   \n'
+        f'X_test:     {X_test.shape},  \n'
+        f'y_test:     {y_test.shape}')
+    
     return X_train, y_train, X_val, y_val, X_test, y_test, scalers

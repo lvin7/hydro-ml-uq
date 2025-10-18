@@ -1,6 +1,6 @@
 import sys
 from data_utils import data_prep
-from models import build_model
+from models import build_model, train_model
 
 def main():
     # Main code
@@ -10,7 +10,9 @@ def main():
         target='Q',
         vars='Qpt',
     )
-    build_model(input_shape=X_train[0].shape, horizon=5)
+    model = build_model(input_shape=X_train[0].shape, horizon=5)
+    _, best_val = train_model(model, X_train, y_train, X_val, y_val)
+    print(best_val)
     pass
 
 if __name__ == "__main__":

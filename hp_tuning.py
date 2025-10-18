@@ -1,7 +1,7 @@
 import numpy as np
 import tensorflow as tf
 import keras_tuner as kt
-from tensorflow.keras.callbacks import EarlyStopping
+from keras.callbacks import EarlyStopping
 
 from models import build_model
 
@@ -20,6 +20,7 @@ def choose_hp(hp):
         "kernel_size": hp.Choice('kernel_size', values=[2, 3, 5]),
         "nb_stacks": hp.Choice('nb_stacks', values=[1, 2, 3]),
         "dilations": hp.Choice('dilations', values=[[1, 2, 4], [1, 2, 4, 8], [1, 2, 4, 8, 16]]),
+        "kernel_initializer": hp.Choice('kernel_initializer', values=['glorot_uniform']),
         "layer_norm": hp.Boolean('layer_norm'),
     },
     "TKAN": {
@@ -35,9 +36,9 @@ def choose_hp(hp):
     "dropout_rate": hp.Float('dropout_rate', min_value=0.05, max_value=0.7, step=0.05),
     "lr": hp.Float('lr', min_value=1e-5, max_value=1e-2, sampling="LOG"),
     "wd": hp.Float('wd', min_value=0.0, max_value=0.1, step=0.01),
+    "cn": hp.Float('cn', min_value=0.0, max_value=5.0, step=0.5),
     "quantile": hp.Float('quantile', min_value=0.3, max_value=0.8, step=0.05),
-    "activation": hp.Choice('activation', values=["tanh", "relu", ""]),
-    "clip_norm": hp.Float('clip_norm', min_value=0.0, max_value=5.0, step=0.5),
+    "activation": hp.Choice('activation', values=["tanh", "relu", "elu"]),
     }
 
     return layer_hp, global_hp
