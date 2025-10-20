@@ -1,6 +1,6 @@
 import sys
 from data_utils import data_prep
-from models import build_model, train_model
+from models import build_model, train_model, save_model
 
 def main():
     # Main code
@@ -12,6 +12,7 @@ def main():
     )
     model = build_model(input_shape=X_train[0].shape, horizon=5)
     _, best_val = train_model(model, X_train, y_train, X_val, y_val)
+    save_model(model)
     print(best_val)
     pass
 

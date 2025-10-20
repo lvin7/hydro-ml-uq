@@ -133,10 +133,11 @@ def train_model(model, X_train, y_train, X_val, y_val, epochs=500, batch_size=32
 
 
 def save_model(model, nwp='ifs', vars='Qpt', lag=3, tuner=None):
-    model_name = f'{model.name}_{nwp}_{vars}_{lag}_{tuner}'
+    model_name = f'models/{model.name}_{nwp}_{vars}_{lag}_{tuner}'
     model.save(f'{model_name}.keras')
     pass
 
 def load_model(path):
     model = tf.keras.load_model(path)
-    pass
+    # add special calls for TCN and TKAN
+    return model
