@@ -23,32 +23,45 @@ class MyHyperModel(kt.HyperModel):
 
     def build(self, hp):
         # Define search space
-        layer_hp = {
-        "LSTM": {
-            "units_l0": hp.Choice('units_l0', values=[16, 32, 64, 128, 256]), 
-            "units_l1": hp.Choice('units_l1', values=[16, 32, 64, 128, 256]), 
-            "units_l2": hp.Choice('units_l2', values=[16, 32, 64, 128, 256]),
-            "recurrent_dropout": hp.Float('recurrent_dropout', min_value=0.0, max_value=0.5, step=0.05),
-            "layer_norm": hp.Boolean('layer_norm'),
-            "bidir": hp.Boolean('bidir'),
-        },
-        "TCN": {
-            "nb_filters": hp.Choice('nb_filters', values=[8, 16, 32, 64, 128]),
-            "kernel_size": hp.Choice('kernel_size', values=[2, 3, 5]),
-            "nb_stacks": hp.Choice('nb_stacks', values=[1, 2]),
-            "dilations": ast.literal_eval(hp.Choice('dilations', values=['[1, 2, 4]', '[1, 2, 4, 8]', '[1, 2, 4, 8, 16]'])),
-            "kernel_initializer": hp.Choice('kernel_initializer', values=['he_normal', 'glorot_uniform']),
-            "layer_norm": hp.Boolean('layer_norm'),
-        },
-        "TKAN": {
-            "units_l0": hp.Choice('units_l0', values=[32, 64, 128, 256]),
-            "units_l1": hp.Choice('units_l1', values=[32, 64, 128, 256]),
-            "units_l2": hp.Choice('units_l2', values=[32, 64, 128, 256]),
-            "layer_norm": hp.Boolean('layer_norm')
-        }
-        }
+        if self.model_arch == LSTM:
+            num_layers = hp.Choice('num_layers', values=[1, 2, 3])
+            layer_hp = {
+                "LSTM": {
+                    "units_l0": hp.Choice('units_l0', values=[16, 32, 64, 128, 256]), 
+                    "units_l1": hp.Choice('units_l1', values=[16, 32, 64, 128, 256]), 
+                    "units_l2": hp.Choice('units_l2', values=[16, 32, 64, 128, 256]),
+                    "recurrent_dropout": hp.Float('recurrent_dropout', min_value=0.0, max_value=0.5, step=0.05),
+                    "layer_norm": hp.Boolean('layer_norm'),
+                    "bidir": hp.Boolean('bidir'),
+                }
+            }
+        elif self.model_arch == TCN:
+            num_layers = 1
+            layer_hp={
+                "TCN": {
+                    "nb_filters": hp.Choice('nb_filters', values=[8, 16, 32, 64, 128]),
+                    "kernel_size": hp.Choice('kernel_size', values=[2, 3, 5]),
+                    "nb_stacks": hp.Choice('nb_stacks', values=[1, 2]),
+                    "dilations": ast.literal_eval(hp.Choice('dilations', values=['[1, 2, 4]', '[1, 2, 4, 8]', '[1, 2, 4, 8, 16]'])),
+                    "kernel_initializer": hp.Choice('kernel_initializer', values=['he_normal', 'glorot_uniform']),
+                    "layer_norm": hp.Boolean('layer_norm'),
+                },
+            }
+        elif self.model_arch == TKAN:
+            num_layers = hp.Choice('num_layers', values=[1, 2, 3])
+            layer_hp = {
+                "TKAN": {
+                    "units_l0": hp.Choice('units_l0', values=[32, 64, 128, 256]),
+                    "units_l1": hp.Choice('units_l1', values=[32, 64, 128, 256]),
+                    "units_l2": hp.Choice('units_l2', values=[32, 64, 128, 256]),
+                    "layer_norm": hp.Boolean('layer_norm')
+                }        
+            }
+        else:
+            print('No model found.')
+
         global_hp = {
-        "num_layers": hp.Choice('num_layers', values=[1, 2, 3]),
+        "num_layers": num_layers,
         "dropout_rate": hp.Float('dropout_rate', min_value=0.05, max_value=0.7, step=0.05),
         "lr": hp.Float('lr', min_value=1e-5, max_value=1e-2, sampling='log'),
         "wd": hp.Float('wd', min_value=0.0, max_value=0.1, step=0.01),
