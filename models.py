@@ -60,7 +60,7 @@ class PinballLoss(tf.keras.losses.Loss):
         return tf.reduce_mean(tf.maximum(self.quantile * error, (self.quantile - 1) * error))
     
 
-def build_model(input_shape, horizon, model_arch=LSTM, hp={}, layer_hp={}):
+def build_model(input_shape, horizon, model_arch=LSTM, global_hp={}, layer_hp={}):
     """
     Build and compile an ML model for multi-step forecasting.
     Args:
@@ -77,27 +77,27 @@ def build_model(input_shape, horizon, model_arch=LSTM, hp={}, layer_hp={}):
     # Build model
     model = Sequential(name=f'{model_name}_model')
     model.add(InputLayer(shape=input_shape))
-    for i in range(hp.get('num_layers', 1)):
+    for i in range(global_hp.get('num_layers', 1)):
         if model_name != 'TCN':
             units = layer_hp.get(f'units_l{i}', 128)
+            
         kwargs = {k: v for k, v in layer_hp.items() if not k.startswith('units_') and k not in ['bidir', 'layer_norm']}
-        kwargs['return_sequences'] = True if i < hp.get('num_layers', 1) - 1 else False
-        kwargs.setdefault('activation', hp.get('activation', 'relu'))
-        # Add hidden layer
+        kwargs['return_sequences'] = True if i < global_hp.get('num_layers', 1) - 1 else False
+        kwargs.setdefault('activation', global_hp.get('activation', 'relu'))
         if model_name != 'TCN':
-            cell = model_arch(units, **kwargs)
+            cell = model_arch(units, **kwargs) # Add hidden layer
         else:
-            cell = model_arch(**kwargs)
+            cell = model_arch(**kwargs) # Add hidden layer
         if layer_hp.get('bidir', False):
             cell = Bidirectional(cell)
         model.add(cell)
-        model.add(Dropout(hp.get('dropout_rate', 0.2)))
+        model.add(Dropout(global_hp.get('dropout_rate', 0.2)))
         if layer_hp.get('layer_norm', True):
             model.add(LayerNormalization())
     model.add(Dense(horizon))
     # Compile the model with Pinball loss
-    optimizer = tf.keras.optimizers.AdamW(learning_rate=hp.get('lr', 0.001), weight_decay=hp.get('wd', 0.0), clipnorm=hp.get('cn', 1.0))
-    model.compile(optimizer=optimizer, loss=PinballLoss(quantile=hp.get('quantile', 0.5)), metrics=['mae'])
+    optimizer = tf.keras.optimizers.AdamW(learning_rate=global_hp.get('lr', 0.001), weight_decay=global_hp.get('wd', 0.0), clipnorm=global_hp.get('cn', 1.0))
+    model.compile(optimizer=optimizer, loss=PinballLoss(quantile=global_hp.get('quantile', 0.5)), metrics=['mae'])
     model.summary()
     return model
 

@@ -6,10 +6,17 @@ from keras.models import Sequential
 from keras.layers import LSTM, Dense, Dropout, LayerNormalization, InputLayer, Bidirectional
 from tcn import TCN, tcn_full_summary
 from tkan import TKAN
+import ast
+
+from models import build_model
 
 
-class MultiHyperModel(kt.HyperModel):
-    def __init__(self, input_shape, horizon, model_arch=LSTM):
+class MyHyperModel(kt.HyperModel):
+    '''
+    Inherit from the keras_tuner HyperModel class. Tweak to enable different model_arch and horizons as input.
+    '''
+    def __init__(self, input_shape, horizon, model_arch=LSTM, *, name=None, tunable=True):
+        super().__init__(name=name, tunable=tunable)
         self.input_shape = input_shape
         self.horizon = horizon
         self.model_arch = model_arch
@@ -26,11 +33,11 @@ class MultiHyperModel(kt.HyperModel):
             "bidir": hp.Boolean('bidir'),
         },
         "TCN": {
-            "nb_filters": hp.Choice('nb_filters', values=[16, 32, 64, 128, 256]),
+            "nb_filters": hp.Choice('nb_filters', values=[8, 16, 32, 64, 128]),
             "kernel_size": hp.Choice('kernel_size', values=[2, 3, 5]),
-            "nb_stacks": hp.Choice('nb_stacks', values=[1, 2, 3]),
-            "dilations": hp.Choice('dilations', values=[[1, 2, 4], [1, 2, 4, 8], [1, 2, 4, 8, 16]]),
-            "kernel_initializer": hp.Choice('kernel_initializer', values=['glorot_uniform']),
+            "nb_stacks": hp.Choice('nb_stacks', values=[1, 2]),
+            "dilations": ast.literal_eval(hp.Choice('dilations', values=['[1, 2, 4]', '[1, 2, 4, 8]', '[1, 2, 4, 8, 16]'])),
+            "kernel_initializer": hp.Choice('kernel_initializer', values=['he_normal', 'glorot_uniform']),
             "layer_norm": hp.Boolean('layer_norm'),
         },
         "TKAN": {
@@ -40,7 +47,6 @@ class MultiHyperModel(kt.HyperModel):
             "layer_norm": hp.Boolean('layer_norm')
         }
         }
-
         global_hp = {
         "num_layers": hp.Choice('num_layers', values=[1, 2, 3]),
         "dropout_rate": hp.Float('dropout_rate', min_value=0.05, max_value=0.7, step=0.05),
@@ -50,9 +56,10 @@ class MultiHyperModel(kt.HyperModel):
         "quantile": hp.Float('quantile', min_value=0.3, max_value=0.8, step=0.05),
         "activation": hp.Choice('activation', values=["tanh", "relu", "elu"]),
         }
-
-        # This part can be removed and build_model can be called....
-
+        # Call build_model function
+        model = build_model(self.input_shape, self.horizon, self.model_arch, global_hp, layer_hp)
+        # This part can be removed and build_model can be called.... (check later)
+        '''
         model_name = self.model_arch.__name__
         if len(layer_hp.values()) > 0:
             layer_hp = layer_hp[model_name]
@@ -81,26 +88,40 @@ class MultiHyperModel(kt.HyperModel):
         optimizer = tf.keras.optimizers.AdamW(learning_rate=global_hp.get('lr', 0.001), weight_decay=global_hp.get('wd', 0.0), clipnorm=global_hp.get('cn', 1.0))
         model.compile(optimizer=optimizer, loss=PinballLoss(quantile=global_hp.get('quantile', 0.5)), metrics=['mae'])
         model.summary()
-
+        '''
         return model
 
 # Use Keras Tuner to choose the best hyperparameters
-def hp_tuning(X_train, y_train, X_val, y_val, input_shape, horizon, model_arch):
+def hp_tuner(X_train, y_train, X_val, y_val, input_shape, horizon, model_arch):
     tuner = kt.RandomSearch(
-        MultiHyperModel(input_shape, horizon, model_arch),
+        MyHyperModel(input_shape, horizon, model_arch),
         objective="val_loss",
         max_trials=100,
-        directory=".",
+        directory="runs",
         project_name="hp_tuning"
     )
     tuner.search(
         X_train, y_train, 
         validation_data=(X_val, y_val),
         epochs=50,
-        batch_size=kt.Int('batch_size', 16, 128, step=16, sampling='log'),
+        batch_size=32,
+    #    batch_size=kt.Int('batch_size', 16, 128, step=16, sampling='log'),
         callbacks=[
             EarlyStopping(patience=10, restore_best_weights=True)
         ]
         )
-    best_hp = tuner.get_best_hyperparameters(1)[0]
+    tuner.search_space_summary()
+    best_hp = tuner.get_best_hyperparameters()[0]
+    # Get the top 3 models
+    models = tuner.get_best_models(num_models=3)
+    best_model = models[0]
+    best_model.summary()
     return best_hp
+
+# We can use this to retrain the model
+'''
+hypermodel = MyHyperModel()
+best_hp = tuner.get_best_hyperparameters()[0]
+model = hypermodel.build(best_hp)
+hypermodel.fit(best_hp, model, x_all, y_all, epochs=1)
+'''
