@@ -139,7 +139,7 @@ def prepare_data(data, target_scaled, target, lag, horizon, val_index, test_inde
 
             # optionally add seasonality feature (if seasonality=True)
             if seasonality:
-                    seq_x = np.hstack((seq_x, np.sin(data[0].index.dayofyear.values.reshape(-1,1)/365.25 * 2*np.pi)))
+                    seq_x = np.hstack((seq_x, np.sin(data[0].index[i:end_ix].dayofyear.values.reshape(-1,1)/365.25 * 2*np.pi)))
             if seq_x is None:
                     break
 

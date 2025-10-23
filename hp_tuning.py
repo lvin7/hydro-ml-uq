@@ -1,14 +1,13 @@
 import numpy as np
 import tensorflow as tf
 import keras_tuner as kt
-from keras.callbacks import EarlyStopping, Callback, ReduceLROnPlateau, TerminateOnNaN
-from keras.models import Sequential
-from keras.layers import LSTM, Dense, Dropout, LayerNormalization, InputLayer, Bidirectional
+from keras.callbacks import EarlyStopping, ReduceLROnPlateau, TerminateOnNaN
+from keras.layers import LSTM
 from tcn import TCN, tcn_full_summary
 from tkan import TKAN
 import ast
 
-from models import build_model
+from models import RestoreBestMeanLoss, build_model
 
 
 class MyHyperModel(kt.HyperModel):
@@ -71,7 +70,6 @@ class MyHyperModel(kt.HyperModel):
         }
         # Call build_model function
         model = build_model(self.input_shape, self.horizon, self.model_arch, global_hp, layer_hp)
-        # This part can be removed and build_model can be called.... (check later)
         '''
         model_name = self.model_arch.__name__
         if len(layer_hp.values()) > 0:
@@ -103,38 +101,75 @@ class MyHyperModel(kt.HyperModel):
         model.summary()
         '''
         return model
+    
+    def fit(self, hp, model, *args, **kwargs):
+        kwargs["batch_size"] = kwargs.get("batch_size", hp.Choice("batch_size", [16, 32, 64, 128]))
+        return model.fit(*args, **kwargs)
 
 # Use Keras Tuner to choose the best hyperparameters
-def hp_tuner(X_train, y_train, X_val, y_val, input_shape, horizon, model_arch):
-    tuner = kt.RandomSearch(
+def hp_tuner(X_train, y_train, X_val, y_val, 
+             input_shape, horizon, model_arch, tuner_type, 
+             trials=50, epochs=50, output_dir='hp_tuning'):
+    
+    if tuner_type == 'random':
+        tuner = kt.RandomSearch(
         MyHyperModel(input_shape, horizon, model_arch),
-        objective="val_loss",
-        max_trials=100,
-        directory="runs",
-        project_name="hp_tuning"
-    )
+        objective=kt.Objective('val_r2', direction='max'),
+        max_trials=trials,
+        directory=output_dir,
+        project_name="rand"
+        )
+    elif tuner_type == 'bayes':
+        tuner = kt.BayesianOptimization(
+        MyHyperModel(input_shape, horizon, model_arch),
+        objective=kt.Objective('val_mae', direction='min'),
+        max_trials=trials,
+        directory=output_dir,
+        project_name="bayes"
+        )
+    elif tuner_type == 'hyperband':
+        tuner = kt.Hyperband(
+        MyHyperModel(input_shape, horizon, model_arch),
+        objective=kt.Objective('val_mae', direction='min'),
+        max_epochs=trials,
+        factor=3,
+        directory=output_dir,
+        project_name="hb"
+        )
+    else:
+        print('Yikes, not an adequate tuner.')
+    
     tuner.search(
         X_train, y_train, 
         validation_data=(X_val, y_val),
-        epochs=50,
-        batch_size=32,
-    #    batch_size=kt.Int('batch_size', 16, 128, step=16, sampling='log'),
+        epochs=epochs,
+        shuffle=False,
         callbacks=[
             EarlyStopping(patience=10, restore_best_weights=True)
         ]
         )
     tuner.search_space_summary()
+    # Get best model
+    best_models = tuner.get_best_models(num_models=1)
+    #best_model[0].summary()
+    # Get best hyperparams
     best_hp = tuner.get_best_hyperparameters()[0]
-    # Get the top 3 models
-    models = tuner.get_best_models(num_models=3)
-    best_model = models[0]
-    best_model.summary()
-    return best_hp
+    return best_models[0], best_hp
 
-# We can use this to retrain the model
-'''
-hypermodel = MyHyperModel()
-best_hp = tuner.get_best_hyperparameters()[0]
-model = hypermodel.build(best_hp)
-hypermodel.fit(best_hp, model, x_all, y_all, epochs=1)
-'''
+# We can use this to fully retrain the best model
+def full_train(best_hp, X_train, y_train, X_val, y_val, input_shape, horizon=5, model_arch=LSTM, epochs=200, patience=30):
+    hypermodel = MyHyperModel(input_shape, horizon, model_arch)
+    model = hypermodel.build(best_hp)
+    
+    reduce_lr = ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=max(5, patience//2), cooldown=2, verbose=1)
+    restore_best = RestoreBestMeanLoss(patience=patience, start_from_epoch=10)
+    print(X_train.shape, y_train.shape)
+    history = hypermodel.fit(best_hp, model, X_train, y_train, 
+                             validation_data=(X_val, y_val), # change later so val is included in training (some left for early-stopping)
+                             epochs=epochs,
+                             shuffle=False,
+                             callbacks=[reduce_lr, restore_best, TerminateOnNaN()],
+    )
+    best_val = np.min(history.history['val_loss'])
+    return model, history, best_val
+    

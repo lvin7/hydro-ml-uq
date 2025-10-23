@@ -3,13 +3,10 @@ import numpy as np
 from keras.callbacks import Callback, ReduceLROnPlateau, TerminateOnNaN
 from keras.models import Sequential
 from keras.layers import LSTM, Dense, Dropout, LayerNormalization, InputLayer, Bidirectional
-from tcn import TCN, tcn_full_summary
-from tkan import TKAN
+from keras.metrics import R2Score
 from keras.initializers import Orthogonal
 
-
-#tf.random.set_seed(42)
-# Use a seed with the Orthogonal initializer
+# Use a seed with the Orthogonal initializer for TKAN
 #initializer = Orthogonal(seed=1)  --- what's this for?
 
 # Restore best mean loss callback
@@ -97,11 +94,13 @@ def build_model(input_shape, horizon, model_arch=LSTM, global_hp={}, layer_hp={}
     model.add(Dense(horizon))
     # Compile the model with Pinball loss
     optimizer = tf.keras.optimizers.AdamW(learning_rate=global_hp.get('lr', 0.001), weight_decay=global_hp.get('wd', 0.0), clipnorm=global_hp.get('cn', 1.0))
+    r2_metric = R2Score(name='r2') 
     model.compile(optimizer=optimizer, loss=PinballLoss(quantile=global_hp.get('quantile', 0.5)), metrics=['mae'])
     model.summary()
     return model
 
 
+# train_full function is used in hp_tuning.py, this is excess
 def train_model(model, X_train, y_train, X_val, y_val, epochs=500, batch_size=32, patience=20):
     """
     Train the model with early stopping and restore best mean loss.
@@ -131,11 +130,6 @@ def train_model(model, X_train, y_train, X_val, y_val, epochs=500, batch_size=32
     best_val = np.min(history.history['val_loss'])
     return history, best_val
 
-
-def save_model(model, nwp='ifs', vars='Qpt', lag=3, tuner=None):
-    model_name = f'models/{model.name}_{nwp}_{vars}_{lag}_{tuner}'
-    model.save(f'{model_name}.keras')
-    pass
 
 def load_model(path):
     model = tf.keras.load_model(path)

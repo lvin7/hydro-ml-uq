@@ -10,7 +10,7 @@ from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error,
 # Metrics helper functions
 # -----------------------
 
-def plot_loss(history, ylim=None):
+def plot_loss(history, ylim=None, save_path=''):
     plt.figure(figsize=(14, 7))
     plt.title('Model loss')
     plt.plot(history.history['loss'], label='train')
@@ -20,23 +20,23 @@ def plot_loss(history, ylim=None):
     plt.ylabel('loss')
     plt.xlabel('epoch')
     plt.legend(loc='best')
-    plt.show()
+    plt.savefig(f'{save_path}/loss.png')
 
 
-def scatter_plot(y_pred, y_true, model_name='_ Model'):
-    mask = ~np.isnan(y_pred) & ~np.isnan(y_obs) & ~np.isinf(y_pred) & ~np.isinf(y_obs)
+def scatter_plot(y_pred, y_true, model_name='_ Model', save_path=''):
+    mask = ~np.isnan(y_pred) & ~np.isnan(y_true) & ~np.isinf(y_pred) & ~np.isinf(y_true)
     y_pred_clean = y_pred[mask].reshape(-1, y_pred.shape[1])
-    y_obs_clean = y_obs[mask].reshape(-1, y_obs.shape[1])
+    y_obs_clean = y_true[mask].reshape(-1, y_true.shape[1])
 
     y_pred_flat = y_pred_clean.flatten()
     y_obs_flat = y_obs_clean.flatten()
 
     fig = plt.figure(figsize=(8, 8))
-    fig.suptitle(f'{station} - {model_name} Scatter Plot', fontsize=16, y=0.8, x=0.4)
+    fig.suptitle(f'{model_name} Scatter Plot', fontsize=16, y=0.8, x=0.4)
     ax_scatter = plt.subplot2grid((4, 4), (1, 0), rowspan=3, colspan=3)
 
-    for i in range(1):
-        ax_scatter.scatter(y_obs_clean, y_pred_clean,
+    for i in range(5):
+        ax_scatter.scatter(y_obs_clean[:, i], y_pred_clean[:, i],
                             label=f'{i + 1} day(s) ahead', alpha=0.3, s=25)
 
     ax_scatter.set_xlabel('Observed discharge (m³/s)', fontsize=14)
@@ -51,35 +51,35 @@ def scatter_plot(y_pred, y_true, model_name='_ Model'):
     ax_scatter.legend(fontsize=10)
 
     plt.tight_layout()
-    plt.show()
+    plt.savefig(f'{save_path}/scatter.png')
+    plt.close()
 
-def ts_plot(y_pred, y_obs, start_date, freq='D', model_name='_ Model'):
-    timestamps = pd.date_range(start=start_date, periods=y_obs.shape[0], freq=freq)
 
-    plt.figure(figsize=(12, 6))
-    plt.plot(timestamps, y_obs, label='Observed', color='black', lw=2)
+def scatter_plot_1dah(y_pred, y_true, model_name='_Model', save_path=''):
+    plt.figure(figsize=(6,6))
+    plt.scatter(y_true[:,0], y_pred[:,0], alpha=0.5)
 
-    for i in range(1):
-        shifted_timestamps = timestamps + pd.Timedelta(days=i)
-        plt.plot(shifted_timestamps, y_pred, linestyle='--', alpha=0.7, lw=1,
-                    label=f'{i + 1} day(s) ahead')
+    reg = LinearRegression().fit(y_true[:, [0]], y_pred[:, 0])
+    y_line = reg.predict(y_true[:, [0]])
 
-    plt.xlabel('Time', fontsize=14)
-    plt.ylabel('Discharge (m³/s)', fontsize=14)
-    plt.title(f'{station} - {model_name} Time Series Plot', fontsize=16)
-    plt.legend(fontsize=12, loc='upper right')
-    plt.grid(False)
+    plt.plot(y_true[:,0], y_line, 'r--', lw=2, label='Regression')
+    plt.plot(y_true[:,0], y_true[:,0], 'k-', lw=1, label='1:1')
+    plt.legend()
+    plt.title(model_name)
+    plt.xlabel('Observed')
+    plt.ylabel('Predicted')
     plt.tight_layout()
-    plt.savefig(f'{station}_{model_name}_timeseries.png', transparent=True)
-    plt.show()
+    plt.savefig(f'{save_path}/scatter_1dah.png')
+    plt.close()
+
 
 def metrics_table(y_pred, y_true):
-    threshold = np.percentile(y_obs, 75)
+    threshold = np.percentile(y_true, 75)
     metrics = []
 
     for i in range(y_pred.shape[1]):
         forecast = y_pred[:, i]
-        observed = y_obs[:, i]
+        observed = y_true[:, i]
         mask = observed >= threshold
         observed_peaks = observed[mask]
         forecast_peaks = forecast[mask]
