@@ -26,7 +26,7 @@ class RestoreBestMeanLoss(Callback):
         val_loss = logs.get('val_loss')
 
         if train_loss is not None and val_loss is not None:
-            mean_loss = (train_loss + val_loss*2) / 3
+            mean_loss = (train_loss + val_loss*3) / 4
         else:
             return  # Skip if one of the losses is missing
         # Check if we should update best weights

@@ -1,0 +1,18 @@
+{
+  "best_score": {
+    "nb_filters": 128,
+    "kernel_size": 2,
+    "nb_stacks": 2,
+    "dilations": "[1, 2, 4, 8, 16]",
+    "kernel_initializer": "he_normal",
+    "layer_norm": false,
+    "dropout_rate": 0.4,
+    "lr": 0.0003864401952051021,
+    "wd": 0.0,
+    "cn": 1.0,
+    "quantile": 0.5,
+    "activation": "elu",
+    "batch_size": 16
+  },
+  "total_tuning_time(min)": 94.89215046167374
+}

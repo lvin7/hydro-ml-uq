@@ -15,9 +15,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", nargs="+", default=[TCN])
     ap.add_argument("--nwps", nargs="+", default=['ifs'])
-    ap.add_argument("--features", nargs="+", default=['Qptsd'])
-    ap.add_argument("--tuners", nargs="+", default=['random', 'bayes', 'hyperband'])
-    ap.add_argument("--lags", nargs="+", type=int, default=[3])
+    ap.add_argument("--features", nargs="+", default=['Qpt'])
+    ap.add_argument("--tuners", nargs="+", default=['bayesian'])
+    ap.add_argument("--lags", nargs="+", type=int, default=[2])
     #---------------------------------------------------
     ap.add_argument("--trials", type=int, default=100)
     ap.add_argument("--epochs_fast", type=int, default=100)
@@ -25,6 +25,8 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--outdir", type=str, default="runs") # change to models later
     ap.add_argument("--horizon", type=int, default=5)
+    ap.add_argument("--val_start", type=str, default='2023-01-01')
+    ap.add_argument("--test_start", type=str, default='2023-10-01')
     args = ap.parse_args()
 
     tf.random.set_seed(args.seed)
@@ -46,6 +48,8 @@ def main():
             nwp=nwp,
             target='Q',
             vars=feats,
+            val_start=args.val_start,
+            test_start=args.test_start,
         )
         input_shape = X_train[0].shape
         horizon = y_train.shape[1]

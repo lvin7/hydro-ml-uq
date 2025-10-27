@@ -1,11 +1,13 @@
 import numpy as np
 import tensorflow as tf
 import keras_tuner as kt
+from keras_tuner_extensionpack.differential_evolution import DifferentialEvolution
 from keras.callbacks import EarlyStopping, ReduceLROnPlateau, TerminateOnNaN
 from keras.layers import LSTM
 from tcn import TCN, tcn_full_summary
 from tkan import TKAN
 import ast
+import time
 
 from models import RestoreBestMeanLoss, build_model
 
@@ -106,48 +108,90 @@ class MyHyperModel(kt.HyperModel):
         kwargs["batch_size"] = kwargs.get("batch_size", hp.Choice("batch_size", [16, 32, 64, 128]))
         return model.fit(*args, **kwargs)
 
+# Custom wrapper for evol print
+def evol_with_progress(tuner, X_train, y_train, X_val, y_val, epochs):
+    pop = tuner.oracle.population_size
+    total_gens = tuner.oracle.trials_size
+    last_count = len(tuner.oracle.trials)
+    gen = last_count // pop  # resume-safe
+
+    print(f"[DE] Starting/resuming at generation {gen+1}/{total_gens} (pop={pop})")
+
+    while True:
+        tuner.search(
+            X_train, y_train,
+            validation_data=(X_val, y_val),
+            epochs=epochs,
+            shuffle=False,
+        )
+        count = len(tuner.oracle.trials)
+        if count - last_count >= pop:
+            gen += 1
+            print(f"[DE] Finished generation {gen}/{total_gens} — total trials: {count}", flush=True)
+            last_count = count
+
+        m = tuner.oracle.max_trials
+        if m is not None and count >= m:
+            print(f"[DE] Reached max_trials {m}. Done.", flush=True)
+            break
+
+
 # Use Keras Tuner to choose the best hyperparameters
 def hp_tuner(X_train, y_train, X_val, y_val, 
              input_shape, horizon, model_arch, tuner_type, 
-             trials=50, epochs=50, output_dir='hp_tuning'):
+             trials=50, epochs=50, pop_size=32, generations=4, output_dir='hp_tuning'):
     
     if tuner_type == 'random':
         tuner = kt.RandomSearch(
-        MyHyperModel(input_shape, horizon, model_arch),
-        objective=kt.Objective('val_r2', direction='max'),
-        max_trials=trials,
-        directory=output_dir,
-        project_name="rand"
+            MyHyperModel(input_shape, horizon, model_arch),
+            objective=kt.Objective('val_mae', direction='min'),
+            max_trials=trials,
+            directory=output_dir,
+            project_name="rand"
         )
-    elif tuner_type == 'bayes':
+    elif tuner_type == 'bayesian':
         tuner = kt.BayesianOptimization(
-        MyHyperModel(input_shape, horizon, model_arch),
-        objective=kt.Objective('val_mae', direction='min'),
-        max_trials=trials,
-        directory=output_dir,
-        project_name="bayes"
+            MyHyperModel(input_shape, horizon, model_arch),
+            objective=kt.Objective('val_mae', direction='min'),
+            max_trials=trials,
+            directory=output_dir,
+            project_name="bayes"
         )
     elif tuner_type == 'hyperband':
         tuner = kt.Hyperband(
-        MyHyperModel(input_shape, horizon, model_arch),
-        objective=kt.Objective('val_mae', direction='min'),
-        max_epochs=trials,
-        factor=3,
-        directory=output_dir,
-        project_name="hb"
+            MyHyperModel(input_shape, horizon, model_arch),
+            objective=kt.Objective('val_mae', direction='min'),
+            max_epochs=epochs,
+            factor=3,
+            directory=output_dir,
+            project_name="hb"
+        )
+    elif tuner_type == 'evol':
+        tuner = DifferentialEvolution(
+            MyHyperModel(input_shape, horizon, model_arch),
+            objective=kt.Objective('val_mae', direction='min'),
+            population_size=pop_size,
+            trials_size=generations,
+            elitism_rate=0.1,        # DE classic default
+            max_retries_per_trial=0,
+            directory=output_dir,
+            project_name="de",
         )
     else:
         print('Yikes, not an adequate tuner.')
     
-    tuner.search(
-        X_train, y_train, 
-        validation_data=(X_val, y_val),
-        epochs=epochs,
-        shuffle=False,
-        callbacks=[
-            EarlyStopping(patience=10, restore_best_weights=True)
-        ]
-        )
+    if tuner_type == 'evol':
+        evol_with_progress(tuner, X_train, y_train, X_val, y_val, epochs)
+    else:
+        tuner.search(
+            X_train, y_train, 
+            validation_data=(X_val, y_val),
+            epochs=epochs,
+            shuffle=False,
+            callbacks=[
+                EarlyStopping(patience=10, restore_best_weights=True)
+            ]
+            )
     tuner.search_space_summary()
     # Get best model
     best_models = tuner.get_best_models(num_models=1)
@@ -157,15 +201,19 @@ def hp_tuner(X_train, y_train, X_val, y_val,
     return best_models[0], best_hp
 
 # We can use this to fully retrain the best model
-def full_train(best_hp, X_train, y_train, X_val, y_val, input_shape, horizon=5, model_arch=LSTM, epochs=200, patience=30):
+def full_train(best_hp, X_train, y_train, X_val, y_val, input_shape, horizon=5, model_arch=LSTM, epochs=200, patience=30, val_part=0.1):
     hypermodel = MyHyperModel(input_shape, horizon, model_arch)
     model = hypermodel.build(best_hp)
+
+    # Append val data to training (leave a bit for early stopping)
+    X_train = np.vstack((X_train, X_val))
+    y_train = np.vstack((y_train, y_val))
     
     reduce_lr = ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=max(5, patience//2), cooldown=2, verbose=1)
     restore_best = RestoreBestMeanLoss(patience=patience, start_from_epoch=10)
     print(X_train.shape, y_train.shape)
     history = hypermodel.fit(best_hp, model, X_train, y_train, 
-                             validation_data=(X_val, y_val), # change later so val is included in training (some left for early-stopping)
+                             validation_split=val_part,
                              epochs=epochs,
                              shuffle=False,
                              callbacks=[reduce_lr, restore_best, TerminateOnNaN()],
