@@ -3,7 +3,7 @@ import tensorflow as tf
 import keras_tuner as kt
 from keras_tuner_extensionpack.differential_evolution import DifferentialEvolution
 from keras.callbacks import EarlyStopping, ReduceLROnPlateau, TerminateOnNaN
-from keras.layers import LSTM
+from keras.layers import LSTM, Dense
 from tcn import TCN, tcn_full_summary
 from tkan import TKAN
 import ast

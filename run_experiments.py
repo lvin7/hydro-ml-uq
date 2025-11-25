@@ -62,19 +62,12 @@ def main():
         best_model.save(os.path.join(run_dir, "best_model.keras"))
         with open(os.path.join(run_dir, "best_model_config.json"), "w") as f:
             json.dump(best_model.get_config(), f, indent=2)
-        with open(os.path.join(run_dir, "tuning_summary.json"), "w") as f:
-            json.dump({"best_score": best_hp.values, "total_tuning_time(min)": total_time / 60}, f, indent=2)
-
-        print("Training the final model...")
-        model, history, best_val = full_train(
-            best_hp, X_train, y_train, X_val, y_val, input_shape, horizon=args.horizon, model_arch=model_arch, epochs=args.epochs_full, patience=30
-        )
-        y_pred = model.predict(X_test)
-        metrics = metrics_table(y_pred, y_test)
-        plot_loss(history, save_path=run_dir)
-        print(best_val)
-        scatter_plot(y_pred, y_test, model_name=model_name, save_path=run_dir)
-        scatter_plot_1dah(y_pred, y_test, model_name=model_name, save_path=run_dir)
+        summary_path = os.path.join(run_dir, "tuning_summary.json")
+        if os.path.exists(summary_path):
+            print(f"[INFO] Summary already exists at {summary_path}.")
+        else:
+            with open(summary_path, "w") as f:
+                json.dump({"best_score": best_hp.values, "total_tuning_time(min)": total_time / 60}, f, indent=2)
 
         fname = f"model-{model_name}"
         f"_nwp-{nwp}"
@@ -82,14 +75,29 @@ def main():
         f"_lag-{lag}"
         f"_tuner-{tuner_name}"
 
-        # Save model
-        model.save(os.path.join(run_dir, f"{fname}.keras"))
+        model_path   = os.path.join(run_dir, f"{fname}.keras")
 
-        # Save scalers
-        joblib.dump(scalers, os.path.join(run_dir, f"{fname}.scalers.pkl"))
+        if os.path.exists(model_path):
+            print(f"[INFO] Final model already exists at {model_path}. Skipping final training.")
+        else:
+            print("Training the final model...")
+            model, history, best_val = full_train(
+                best_hp, X_train, y_train, X_val, y_val, input_shape, horizon=args.horizon, model_arch=model_arch, epochs=args.epochs_full, patience=30
+            )
+            y_pred = model.predict(X_test)
+            metrics = metrics_table(y_pred, y_test)
+            plot_loss(history, save_path=run_dir)
+            print(best_val)
+            scatter_plot(y_pred, y_test, model_name=model_name, save_path=run_dir)
+            scatter_plot_1dah(y_pred, y_test, model_name=model_name, save_path=run_dir)
 
-        # Save metrics
-        metrics.to_csv(os.path.join(run_dir, f"{fname}.csv"), index=False)
+            # Save model
+            model.save(model_path)
+            # Save scalers
+            joblib.dump(scalers, os.path.join(run_dir, f"{fname}.scalers.pkl"))
+            # Save metrics
+            metrics.to_csv(os.path.join(run_dir, f"{fname}.csv"), index=False)
+
 
 if __name__ == "__main__":
     main()
