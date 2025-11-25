@@ -13,17 +13,17 @@ from metrics import plot_loss, scatter_plot, scatter_plot_1dah, metrics_table
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--models", nargs="+", default=[TCN])
+    ap.add_argument("--models", nargs="+", default=[LSTM])
     ap.add_argument("--nwps", nargs="+", default=['ifs'])
-    ap.add_argument("--features", nargs="+", default=['Qpt'])
-    ap.add_argument("--tuners", nargs="+", default=['bayesian'])
-    ap.add_argument("--lags", nargs="+", type=int, default=[2])
+    ap.add_argument("--features", nargs="+", default=['Qpt', 'Qpts', 'Qptsd'])
+    ap.add_argument("--tuners", nargs="+", default=['bayesian', 'random', 'hyperband', 'evol'])
+    ap.add_argument("--lags", nargs="+", type=int, default=[2, 3, 4, 5])
     #---------------------------------------------------
     ap.add_argument("--trials", type=int, default=100)
     ap.add_argument("--epochs_fast", type=int, default=100)
     ap.add_argument("--epochs_full", type=int, default=500)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--outdir", type=str, default="runs") # change to models later
+    ap.add_argument("--outdir", type=str, default="models") # change to models later
     ap.add_argument("--horizon", type=int, default=5)
     ap.add_argument("--val_start", type=str, default='2023-01-01')
     ap.add_argument("--test_start", type=str, default='2023-10-01')
