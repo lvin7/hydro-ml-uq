@@ -2,7 +2,7 @@ import tensorflow as tf
 import numpy as np
 from keras.callbacks import Callback, ReduceLROnPlateau, TerminateOnNaN
 from keras.models import Sequential
-from keras.layers import LSTM, Dense, Dropout, LayerNormalization, InputLayer, Bidirectional
+from keras.layers import LSTM, Dense, Dropout, LayerNormalization, InputLayer, Bidirectional, Flatten
 from keras.metrics import R2Score
 from keras.initializers import Orthogonal
 
@@ -74,17 +74,20 @@ def build_model(input_shape, horizon, model_arch=LSTM, global_hp={}, layer_hp={}
     # Build model
     model = Sequential(name=f'{model_name}_model')
     model.add(InputLayer(shape=input_shape))
+    if model_name == 'Dense':
+        model.add(Flatten())
     for i in range(global_hp.get('num_layers', 1)):
         if model_name != 'TCN':
             units = layer_hp.get(f'units_l{i}', 128)
             
         kwargs = {k: v for k, v in layer_hp.items() if not k.startswith('units_') and k not in ['bidir', 'layer_norm']}
-        kwargs['return_sequences'] = True if i < global_hp.get('num_layers', 1) - 1 else False
+        if model_name != 'Dense':
+            kwargs['return_sequences'] = True if i < global_hp.get('num_layers', 1) - 1 else False
         kwargs.setdefault('activation', global_hp.get('activation', 'relu'))
-        if model_name != 'TCN':
-            cell = model_arch(units, **kwargs) # Add hidden layer
+        if model_name == 'TCN':
+            cell = model_arch(**kwargs) # Add hidden layers
         else:
-            cell = model_arch(**kwargs) # Add hidden layer
+            cell = model_arch(units, **kwargs) # Add hidden layers
         if layer_hp.get('bidir', False):
             cell = Bidirectional(cell)
         model.add(cell)

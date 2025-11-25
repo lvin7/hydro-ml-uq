@@ -55,8 +55,44 @@ class MyHyperModel(kt.HyperModel):
                     "units_l0": hp.Choice('units_l0', values=[32, 64, 128, 256]),
                     "units_l1": hp.Choice('units_l1', values=[32, 64, 128, 256]),
                     "units_l2": hp.Choice('units_l2', values=[32, 64, 128, 256]),
-                    "layer_norm": hp.Boolean('layer_norm')
+                    "sub_kan_configs": ast.literal_eval(
+                        hp.Choice(
+                            'sub_kan_configs',
+                            values=[
+                                # lighter grids
+                                "[{'spline_order': 2, 'grid_size': 6}, "
+                                " {'spline_order': 2, 'grid_size': 6}, "
+                                " {'spline_order': 2, 'grid_size': 6}]",
+
+                                # moderate grids
+                                "[{'spline_order': 3, 'grid_size': 10}, "
+                                " {'spline_order': 3, 'grid_size': 10}, "
+                                " {'spline_order': 3, 'grid_size': 10}]",
+
+                                # slightly richer grids
+                                "[{'spline_order': 4, 'grid_size': 12}, "
+                                " {'spline_order': 3, 'grid_size': 10}, "
+                                " {'spline_order': 5, 'grid_size': 8}]",
+
+                                # let TKAN use its defaults
+                                "[None, None, None]"
+                            ]
+                        )
+                    ),
+                    "use_bias": hp.Boolean('use_bias'),
+                    "layer_norm": hp.Boolean('layer_norm'),
                 }        
+            }
+        elif self.model_arch == Dense:
+            # Simple dense baseline on top of flattened inputs
+            num_layers = hp.Choice('num_layers', values=[1, 2, 3])
+            layer_hp = {
+                "Dense": {
+                    "units_l0": hp.Choice('units_l0', values=[32, 64, 128, 256]),
+                    "units_l1": hp.Choice('units_l1', values=[32, 64, 128, 256]),
+                    "units_l2": hp.Choice('units_l2', values=[32, 64, 128, 256]),
+                    "layer_norm": hp.Boolean('layer_norm'),
+                }
             }
         else:
             print('No model found.')
