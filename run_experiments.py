@@ -1,21 +1,48 @@
 import sys, os, json, itertools, argparse
 import time
+import shutil
+import gc
 import joblib
 import tensorflow as tf
-from keras.layers import LSTM
+from keras.layers import LSTM, Dense
+from keras import backend as K
 from tcn import TCN, tcn_full_summary
 from tkan import TKAN
 from keras.initializers import Orthogonal
+
+# Disable auto-JIT and very aggressive autotuning on GPU
+os.environ["TF_XLA_FLAGS"] = "--tf_xla_auto_jit=0"
 
 from data_utils import data_prep
 from hp_tuning import hp_tuner, full_train
 from metrics import plot_loss, scatter_plot, scatter_plot_1dah, metrics_table
 
+def reset_tuner_directory(path):
+    """Delete the tuner directory if corrupted."""
+    if os.path.exists(path):
+        print(f"[WARN] Removing corrupted tuner directory: {path}")
+        shutil.rmtree(path)
+    else:
+        print(f"[WARN] Tuner directory not found: {path}")
+
+
+def model_type(s):
+    lookup = {
+        "LSTM": LSTM,
+        "TCN": TCN,
+        "TKAN": TKAN,
+        "Dense": Dense,
+    }
+    try:
+        return lookup[s]
+    except KeyError:
+        raise argparse.ArgumentTypeError(f"Unknown model: {s}")
+    
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--models", nargs="+", default=[LSTM])
-    ap.add_argument("--nwps", nargs="+", default=['ifs'])
-    ap.add_argument("--features", nargs="+", default=['Qpt', 'Qpts', 'Qptsd'])
+    ap.add_argument("--models", nargs="+", type=model_type, default=[LSTM, TCN, TKAN, Dense])
+    ap.add_argument("--nwps", nargs="+", default=['ifs', 'ukmo', 'gfs', 'gem'])
+    ap.add_argument("--features", nargs="+", default=['Qp', 'Qpt', 'Qpts', 'Qptsd'])
     ap.add_argument("--tuners", nargs="+", default=['bayesian', 'random', 'hyperband', 'evol'])
     ap.add_argument("--lags", nargs="+", type=int, default=[2, 3, 4, 5])
     #---------------------------------------------------
@@ -53,9 +80,21 @@ def main():
         )
         input_shape = X_train[0].shape
         horizon = y_train.shape[1]
-        best_model, best_hp = hp_tuner(X_train, y_train, X_val, y_val, 
+        try:
+            best_model, best_hp = hp_tuner(X_train, y_train, X_val, y_val, 
                                        input_shape, horizon, model_arch, tuner_name, 
                                        trials=args.trials, epochs=args.epochs_fast, output_dir=run_dir)
+        except AttributeError as e:
+            if "tolist" in str(e):
+                print("\n[ERROR] DE tuner checkpoint corrupted.")
+                print("[ACTION] Deleting tuner directory and restarting the tuner...\n")
+
+                reset_tuner_directory(run_dir)
+                raise RuntimeError(
+                    f"DE tuner checkpoint corrupted at {run_dir}. "
+                    "Deleted the tuner directory and rerunning..."
+                )
+            raise  
 
         total_time = time.time() - start_time
 
@@ -98,6 +137,28 @@ def main():
             # Save metrics
             metrics.to_csv(os.path.join(run_dir, f"{fname}.csv"), index=False)
 
+        # Clean up
+        print("🧹 Cleaning memory...")
+
+        # Clear TensorFlow / Keras session
+        try:
+            K.clear_session()
+        except Exception:
+            pass
+
+        # delete created objects
+        for obj in ["best_model", "best_hp", "tuner"]:
+            try:
+                del globals()[obj]
+            except KeyError:
+                try:
+                    del locals()[obj]   # works in interactive shells, not in functions
+                except:
+                    pass
+
+        # forced Garbage Collection
+        gc.collect()
+        time.sleep(0.5)
 
 if __name__ == "__main__":
     main()
