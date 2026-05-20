@@ -174,7 +174,7 @@ def prepare_data(data, target_scaled, target, lag, horizon, val_index, test_inde
     )
 
 
-# ----------------------------------- Parameters (to be set as needed) -----------------------------------
+# ---------------------- Parameters (to be set as needed) ----------------------
 
 # File path
 file_path = 'data'   

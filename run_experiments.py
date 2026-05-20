@@ -75,6 +75,7 @@ def main():
             nwp=nwp,
             target='Q',
             vars=feats,
+            #lag=lag, # lag is not used, instead we use replicates to see variability in training
             val_start=args.val_start,
             test_start=args.test_start,
         )
