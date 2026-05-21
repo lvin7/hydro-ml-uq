@@ -1,17 +1,68 @@
+"""
+Figure 5 — Cost vs. RMSE Pareto trade-off across HPO algorithms.
+
+This script produces Figure 5 in two stages:
+
+  1. Compute stage: load each retained pipeline's trained .keras model, predict on
+     the test set, compute RMSE for the chosen horizon, and read tuning cost from
+     each pipeline's tuning_summary.json. Save the per-pipeline (cost, RMSE)
+     table to figures/Figure5_points.csv.
+
+  2. Plot stage: read Figure5_points.csv, apply quantile trimming, draw the
+     compute-cost violin (panel a) and the cost-vs-RMSE scatter with Pareto front
+     (panel b), and save Figure5_v4_cost_vs_rmse_trim_shaded.{png,pdf}.
+
+The compute stage is slow (loads many trained models). It is skipped automatically
+if Figure5_points.csv already exists. Pass --recompute to force re-computation.
+"""
+
 from __future__ import annotations
 
 import argparse
+import gc
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import tensorflow as tf
 from matplotlib.patches import Ellipse
 
+from data_utils import data_prep
+from tcn import TCN
+from tkan import TKAN
 
-# -------------------------
+
+# =========================================================
+# Custom loss (only needed for safe deserialization)
+# =========================================================
+class PinballLoss(tf.keras.losses.Loss):
+    def __init__(self, quantile, name="pinball_loss"):
+        super().__init__(name=name)
+        self.quantile = quantile
+
+    def call(self, y_true, y_pred):
+        error = y_true - y_pred
+        return tf.reduce_mean(tf.maximum(self.quantile * error, (self.quantile - 1) * error))
+
+    def get_config(self):
+        return {"quantile": self.quantile, "name": self.name}
+
+
+CUSTOM_OBJECTS = {
+    "TCN": TCN,
+    "Custom>TCN": TCN,
+    "TKAN": TKAN,
+    "Custom>TKAN": TKAN,
+    "PinballLoss": PinballLoss,
+    "pinball_loss": PinballLoss,
+}
+
+
+# =========================================================
 # Labels / markers
-# -------------------------
+# =========================================================
 def nice_tuner_name(t: str) -> str:
     t = str(t).lower()
     return {
@@ -32,13 +83,182 @@ def marker_for(t: str) -> str:
     }.get(t, "o")
 
 
-# -------------------------
-# Ellipse shading
-# -------------------------
+# =========================================================
+# Helpers (compute stage)
+# =========================================================
+def _resolve_path(p: str | Path) -> Path:
+    p = Path(str(p))
+    return p if p.is_absolute() else (Path.cwd() / p)
+
+
+def _safe_read_json(p: Path) -> dict:
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    y_true = np.asarray(y_true, dtype=float).reshape(-1)
+    y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
+    m = np.isfinite(y_true) & np.isfinite(y_pred)
+    if not np.any(m):
+        return np.nan
+    e = y_true[m] - y_pred[m]
+    return float(np.sqrt(np.mean(e * e)))
+
+
+def rmse_over_horizon(y_test: np.ndarray, y_pred: np.ndarray, horizon: int = 1, agg: str = "single") -> float:
+    y_test = np.asarray(y_test, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    H = y_test.shape[1]
+
+    if agg == "mean":
+        vals = [rmse(y_test[:, h], y_pred[:, h]) for h in range(H)]
+        return float(np.nanmean(vals))
+
+    h = int(horizon)
+    if h < 1 or h > H:
+        raise ValueError(f"horizon must be in [1,{H}]")
+    return rmse(y_test[:, h - 1], y_pred[:, h - 1])
+
+
+def load_cost_hours(row: pd.Series) -> float | None:
+    if "tuning_summary_path" in row.index and pd.notna(row["tuning_summary_path"]):
+        p = _resolve_path(row["tuning_summary_path"])
+    else:
+        p = _resolve_path(Path(str(row["run_dir"])) / "tuning_summary.json")
+
+    if not p.exists():
+        return None
+
+    d = _safe_read_json(p)
+    if "total_tuning_time(min)" in d:
+        try:
+            return float(d["total_tuning_time(min)"]) / 60.0
+        except Exception:
+            return None
+
+    for k in ["total_tuning_time_min", "total_tuning_minutes", "total_time_min"]:
+        if k in d:
+            try:
+                return float(d[k]) / 60.0
+            except Exception:
+                return None
+
+    return None
+
+
+# =========================================================
+# Compute stage — build Figure5_points.csv
+# =========================================================
+def compute_points(args) -> pd.DataFrame:
+    runs_csv = Path(args.runs_csv)
+    df = pd.read_csv(runs_csv)
+
+    required = {"model", "nwp", "feat", "replicate", "tuner", "run_dir"}
+    missing = required - set(df.columns)
+    if missing:
+        raise RuntimeError(f"runs_csv missing columns: {sorted(missing)}")
+
+    df["tuner"] = df["tuner"].astype(str)
+    df = df[df["tuner"].isin(args.tuners)].copy()
+    if len(df) == 0:
+        raise RuntimeError("No runs left after filtering by --tuners.")
+
+    if args.max_models and args.max_models > 0:
+        df = df.head(int(args.max_models)).copy()
+
+    # Cache test data per (nwp, feat)
+    data_cache: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]] = {}
+
+    rows = []
+    n_missing_cost = 0
+    n_fail_model = 0
+
+    print(f"[INFO] Computing RMSE from .keras predictions for {len(df)} runs...")
+    print("[INFO] This requires the trained models and may take a while.")
+
+    for k, row in df.iterrows():
+        cost_h = load_cost_hours(row)
+        if cost_h is None or not np.isfinite(cost_h):
+            n_missing_cost += 1
+            continue
+
+        key = (str(row["nwp"]), str(row["feat"]))
+        if key not in data_cache:
+            _, _, _, _, X_test, y_test, _ = data_prep(
+                nwp=key[0],
+                target="Q",
+                vars=key[1],
+                val_start=args.val_start,
+                test_start=args.test_start,
+            )
+            data_cache[key] = (np.asarray(X_test, dtype=float), np.asarray(y_test, dtype=float))
+
+        X_test, y_test = data_cache[key]
+
+        if "keras_path" in df.columns and pd.notna(row.get("keras_path", np.nan)):
+            keras_path = _resolve_path(row["keras_path"])
+        else:
+            run_dir = _resolve_path(row["run_dir"])
+            cands = list(run_dir.glob("*.keras"))
+            keras_path = cands[0] if cands else None
+
+        if keras_path is None or not keras_path.exists():
+            n_fail_model += 1
+            continue
+
+        model = None
+        try:
+            model = tf.keras.models.load_model(keras_path, compile=False, custom_objects=CUSTOM_OBJECTS)
+            yp = model.predict(X_test, batch_size=args.batch_size, verbose=0)
+            yp = np.asarray(yp, dtype=float)
+
+            if yp.shape != y_test.shape:
+                n_fail_model += 1
+                continue
+
+            r = rmse_over_horizon(y_test, yp, horizon=args.horizon, agg=args.rmse_agg)
+            rows.append({
+                "tuner": str(row["tuner"]),
+                "tuner_name": nice_tuner_name(row["tuner"]),
+                "cost_hours": float(cost_h),
+                "rmse": float(r),
+            })
+        except Exception:
+            n_fail_model += 1
+        finally:
+            try:
+                tf.keras.backend.clear_session()
+            except Exception:
+                pass
+            if model is not None:
+                del model
+            gc.collect()
+
+    dff = pd.DataFrame(rows)
+
+    print(f"[INFO] usable points: {len(dff)}")
+    if n_missing_cost:
+        print(f"[WARN] missing tuning cost for {n_missing_cost} runs.")
+    if n_fail_model:
+        print(f"[WARN] failed model load/predict/shape for {n_fail_model} runs.")
+
+    if len(dff) < 10:
+        raise RuntimeError(
+            "Too few usable points to build Figure 5. "
+            "Check that keras_path and tuning_summary.json are available."
+        )
+
+    return dff
+
+
+# =========================================================
+# Plot stage — covariance ellipse, Pareto, smoothing
+# =========================================================
 def add_cov_ellipse(ax, x, y, n_std=1.0, facecolor="none", alpha=0.10):
-    """
-    Add covariance ellipse (~n_std) in (x,y) space.
-    """
     x = np.asarray(x, float)
     y = np.asarray(y, float)
     m = np.isfinite(x) & np.isfinite(y)
@@ -65,13 +285,7 @@ def add_cov_ellipse(ax, x, y, n_std=1.0, facecolor="none", alpha=0.10):
     ax.add_patch(ell)
 
 
-# -------------------------
-# Pareto + smoothing
-# -------------------------
 def pareto_mask_min2(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """
-    Pareto-efficient mask for minimizing (x,y).
-    """
     x = np.asarray(x, float)
     y = np.asarray(y, float)
     good = np.isfinite(x) & np.isfinite(y)
@@ -80,7 +294,7 @@ def pareto_mask_min2(x: np.ndarray, y: np.ndarray) -> np.ndarray:
         return mask
 
     idx = np.where(good)[0]
-    order = idx[np.argsort(x[idx], kind="mergesort")]  # increasing x
+    order = idx[np.argsort(x[idx], kind="mergesort")]
     best_y = np.inf
     for j in order:
         if y[j] < best_y - 1e-12:
@@ -90,9 +304,6 @@ def pareto_mask_min2(x: np.ndarray, y: np.ndarray) -> np.ndarray:
 
 
 def smooth_monotone(x: np.ndarray, y: np.ndarray, window: int = 3) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Light smoothing: running median + enforce non-increasing y with increasing x.
-    """
     x = np.asarray(x, float)
     y = np.asarray(y, float)
     if len(x) <= 2:
@@ -113,62 +324,21 @@ def smooth_monotone(x: np.ndarray, y: np.ndarray, window: int = 3) -> tuple[np.n
     return x, y_mono
 
 
-# -------------------------
-# Main
-# -------------------------
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--points_csv", type=str, default="figures/Figure5_points.csv")
-    ap.add_argument("--outdir", type=str, default="figures")
-
-    ap.add_argument("--trim", type=float, default=0.05,
-                    help="Tail trim fraction for thresholds (e.g., 0.05 => keep 5–95%).")
-    ap.add_argument("--trim_rmse", action="store_true",
-                    help="Also trim RMSE using the same tail fraction.")
-    ap.add_argument("--min_minutes", type=float, default=10.0,
-                    help="Drop runs with cost < min_minutes (likely failed/empty tuning).")
-
-    # IMPORTANT CHANGE:
-    # compute trim thresholds on the FULL dataset (before min_minutes filter),
-    # then apply min_minutes + those thresholds.
-    ap.add_argument("--trim_reference", choices=["full", "post_min"], default="full",
-                    help="Where to compute quantile thresholds: full dataset (default) or after min_minutes filter.")
-
-    ap.add_argument("--h_label", type=str, default="H=1")
-
-    # shading default ON, can disable
-    ap.add_argument("--no_shade_groups", action="store_true",
-                    help="Disable tuner-group ellipse shading in panel (b).")
-
-    ap.add_argument("--pareto_smooth", action="store_true",
-                    help="Light smoothing of Pareto curve.")
-    ap.add_argument("--pareto_window", type=int, default=3)
-
-    args = ap.parse_args()
-
-    points_csv = Path(args.points_csv)
+def plot_pareto(df0: pd.DataFrame, args) -> None:
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-
-    df0 = pd.read_csv(points_csv)
-
-    needed = {"tuner", "cost_hours", "rmse"}
-    missing = needed - set(df0.columns)
-    if missing:
-        raise RuntimeError(f"{points_csv} missing columns: {sorted(missing)}")
 
     df0 = df0.copy()
     df0["tuner"] = df0["tuner"].astype(str).str.lower()
     df0["cost_hours"] = pd.to_numeric(df0["cost_hours"], errors="coerce")
     df0["rmse"] = pd.to_numeric(df0["rmse"], errors="coerce")
-
     df0 = df0[np.isfinite(df0["cost_hours"]) & np.isfinite(df0["rmse"])].copy()
+
     if len(df0) < 20:
-        raise RuntimeError("Too few valid points in points_csv.")
+        raise RuntimeError("Too few valid points to plot.")
 
     q = float(args.trim)
 
-    # Choose where thresholds are computed
     if args.trim_reference == "full":
         ref = df0
     else:
@@ -184,7 +354,6 @@ def main():
     else:
         rmse_lo, rmse_hi = -np.inf, np.inf
 
-    # Apply filters: (1) min_minutes, then (2) quantile thresholds from ref
     min_hours = float(args.min_minutes) / 60.0
     df = df0[df0["cost_hours"] >= min_hours].copy()
 
@@ -195,39 +364,37 @@ def main():
     df_t = df[m].copy()
 
     if len(df_t) < 40:
-        raise RuntimeError(f"Too few points after filtering (n={len(df_t)}). "
-                           f"Try smaller trim or trim_reference=post_min.")
+        raise RuntimeError(
+            f"Too few points after filtering (n={len(df_t)}). "
+            f"Try a smaller --trim or --trim_reference post_min."
+        )
 
-    # Canonical tuner order
     order = [t for t in ["random", "bayesian", "hyperband", "evol"] if t in df_t["tuner"].unique()]
 
-    # Style
     plt.rcParams.update({
         "font.size": 11,
         "axes.titlesize": 13,
         "axes.labelsize": 12,
         "xtick.labelsize": 11,
         "ytick.labelsize": 11,
-        "axes.spines.top": True,   # was False
-        "axes.spines.right": True, # was False
+        "axes.spines.top": True,
+        "axes.spines.right": True,
     })
 
     fig = plt.figure(figsize=(14.5, 6.2), constrained_layout=True)
-    gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 1.5]) # was 1, 1.35
+    gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 1.5])
 
     ax1 = fig.add_subplot(gs[0, 0])
     ax2 = fig.add_subplot(gs[0, 1])
 
-    # panel labels
     ax1.text(-0.06, 1.05, "a",
-            transform=ax1.transAxes,
-            fontsize=16, fontweight="bold",
-            va="top", ha="left", clip_on=False)
-
+             transform=ax1.transAxes,
+             fontsize=16, fontweight="bold",
+             va="top", ha="left", clip_on=False)
     ax2.text(-0.06, 1.05, "b",
-            transform=ax2.transAxes,
-            fontsize=16, fontweight="bold",
-            va="top", ha="left", clip_on=False)
+             transform=ax2.transAxes,
+             fontsize=16, fontweight="bold",
+             va="top", ha="left", clip_on=False)
 
     cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0", "C1", "C2", "C3"])
     color_map = {t: cycle[i % len(cycle)] for i, t in enumerate(["random", "bayesian", "hyperband", "evol"])}
@@ -248,9 +415,8 @@ def main():
         b.set_alpha(0.20)
         b.set_linewidth(0.9)
 
-    # symmetric jitter
     rng = np.random.default_rng(42)
-    jitter = 0.10 # was 0.11
+    jitter = 0.10
 
     for i, t in enumerate(order, start=1):
         vals = df_t.loc[df_t["tuner"] == t, "cost_hours"].values
@@ -267,19 +433,18 @@ def main():
         ax1.plot([i - 0.20, i + 0.20], [med, med], lw=2.0, color=color_map[t])
 
     ax1.set_xticks(positions)
-    ax1.set_xticklabels([nice_tuner_name(t) for t in order], rotation=0, ha="center") # was rotation=15, ha="right"
+    ax1.set_xticklabels([nice_tuner_name(t) for t in order], rotation=0, ha="center")
     ax1.set_ylabel("Compute cost (GPU-hours)")
-    ax1.set_title("Compute cost by tuning algorithm", loc="center") # was loc="left"
+    ax1.set_title("Compute cost by tuning algorithm", loc="center")
     ax1.grid(True, axis="y", color="0.90", lw=0.9)
     ax1.grid(False, axis="x")
 
-    # lock y-limits to trimmed range (+ small padding) to ensure the “zoom”
     y0, y1 = float(cost_lo), float(cost_hi)
     pad = 0.04 * max(1e-9, (y1 - y0))
     ax1.set_ylim(max(0.0, y0 - pad), y1 + pad)
 
     # -------------------------
-    # (b) Scatter: RMSE (x) vs cost (y) + shaded groups + Pareto
+    # (b) Scatter: RMSE vs cost + Pareto
     # -------------------------
     shade = (not args.no_shade_groups)
     if shade:
@@ -305,7 +470,6 @@ def main():
             label=nice_tuner_name(t),
         )
 
-    # Pareto front (minimize rmse and cost)
     x = df_t["rmse"].to_numpy()
     y = df_t["cost_hours"].to_numpy()
     pm = pareto_mask_min2(x, y)
@@ -321,11 +485,9 @@ def main():
 
     ax2.set_xlabel(r"RMSE (m$^3$/s)")
     ax2.set_ylabel("Compute cost (GPU-hours)")
-    ax2.set_title(f"Cost–performance trade-off (lower RMSE is better) | {args.h_label}", loc="center") # was loc="left"
+    ax2.set_title(f"Cost–performance trade-off (lower RMSE is better) | {args.h_label}", loc="center")
     ax2.grid(True, color="0.90", lw=0.9)
     ax2.legend(frameon=False, loc="upper right")
-
-    # match y-limits to panel (a) for direct comparability
     ax2.set_ylim(ax1.get_ylim())
 
     out_png = outdir / "Figure5_v4_cost_vs_rmse_trim_shaded.png"
@@ -338,10 +500,73 @@ def main():
 
     print(f"[INFO] raw points: {len(df0)}")
     print(f"[INFO] kept after <{args.min_minutes:.0f} min + trim({args.trim_reference}, {q:.2f}): {len(df_t)}")
-    print(f"[INFO] cost kept in [{cost_lo:.3f}, {cost_hi:.3f}] hours; rmse kept in [{rmse_lo:.3f}, {rmse_hi:.3f}]")
+    print(f"[INFO] cost kept in [{cost_lo:.3f}, {cost_hi:.3f}] hours; "
+          f"rmse kept in [{rmse_lo:.3f}, {rmse_hi:.3f}]")
     print(f"[DONE] Saved: {out_png}")
     print(f"[DONE] Saved: {out_pdf}")
-    print(f"[DONE] Saved trimmed points: {outdir / 'Figure5_v4_points_trimmed.csv'}")
+
+
+# =========================================================
+# Main
+# =========================================================
+def main():
+    ap = argparse.ArgumentParser()
+
+    # Shared
+    ap.add_argument("--outdir", type=str, default="figures",
+                    help="Directory for outputs (CSV and figure files).")
+    ap.add_argument("--points_csv", type=str, default="figures/Figure5_points.csv",
+                    help="Per-pipeline (cost, RMSE) cache. Computed automatically if missing.")
+    ap.add_argument("--recompute", action="store_true",
+                    help="Force re-computation of points_csv even if it exists.")
+
+    # Compute stage
+    ap.add_argument("--runs_csv", type=str, default="analysis_out_v4/tables/runs_kept_v4.csv")
+    ap.add_argument("--val_start", type=str, default="2023-01-01")
+    ap.add_argument("--test_start", type=str, default="2023-10-01")
+    ap.add_argument("--tuners", nargs="+", default=["random", "bayesian", "hyperband", "evol"])
+    ap.add_argument("--horizon", type=int, default=1)
+    ap.add_argument("--rmse_agg", choices=["single", "mean"], default="single")
+    ap.add_argument("--batch_size", type=int, default=256)
+    ap.add_argument("--max_models", type=int, default=0,
+                    help="Limit number of models processed (0 = all). Useful for quick tests.")
+
+    # Plot stage
+    ap.add_argument("--trim", type=float, default=0.05,
+                    help="Tail trim fraction for cost thresholds (e.g., 0.05 keeps 5–95%).")
+    ap.add_argument("--trim_rmse", action="store_true",
+                    help="Also trim RMSE using the same tail fraction.")
+    ap.add_argument("--min_minutes", type=float, default=10.0,
+                    help="Drop runs with cost < min_minutes (likely failed/empty tuning).")
+    ap.add_argument("--trim_reference", choices=["full", "post_min"], default="full",
+                    help="Where to compute quantile thresholds: full dataset or after min_minutes filter.")
+    ap.add_argument("--h_label", type=str, default="H=1")
+    ap.add_argument("--no_shade_groups", action="store_true",
+                    help="Disable tuner-group ellipse shading in panel (b).")
+    ap.add_argument("--pareto_smooth", action="store_true",
+                    help="Light smoothing of the Pareto curve.")
+    ap.add_argument("--pareto_window", type=int, default=3)
+
+    args = ap.parse_args()
+
+    points_csv = Path(args.points_csv)
+    points_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    # ---- Compute or load points ----
+    if points_csv.exists() and not args.recompute:
+        print(f"[INFO] Using cached points file: {points_csv}")
+        df_points = pd.read_csv(points_csv)
+    else:
+        if points_csv.exists():
+            print(f"[INFO] --recompute set; overwriting {points_csv}")
+        else:
+            print(f"[INFO] No cached points file found; computing from trained models.")
+        df_points = compute_points(args)
+        df_points.to_csv(points_csv, index=False)
+        print(f"[DONE] Saved points table: {points_csv}")
+
+    # ---- Plot ----
+    plot_pareto(df_points, args)
 
 
 if __name__ == "__main__":

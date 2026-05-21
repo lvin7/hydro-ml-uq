@@ -1,35 +1,27 @@
-# figure4_main_effects_3metrics_stackplot_REPLICATE_RANDOM.py
+# figure4_main_effects_3metrics_stackplot.py
 """
-Companion to figure4_final.py.
+Figure 4 (refined, as requested):
 
-Difference from the original:
-- 'replicate' is treated as a RANDOM EFFECT (random intercept) instead of being
-  excluded from the model. Fixed effects remain: nwp, feat, model, tuner.
+Three panels (a,b,c): RMSE, NSE, KGE
+Each panel shows NORMALIZED attribution vs horizon (H=1..5) as a stackplot
+(Main contributors normalized: NWP, Features, ML architecture, Tuner; replicates omitted)
 
-Approach:
-- For each horizon h and each metric m, fit a linear mixed-effects model:
-      y ~ nwp + feat + model + tuner + (1 | replicate)
-- Compute partial SS per fixed-effect factor via drop-one refits on the
-  fixed-effect design matrix, holding the random-effect structure constant.
-- Convert to eta^2 (share of total SST), then normalize across the four
-  main factors so the stackplot is directly comparable to figure4_final.py.
+Color coding (requested):
+- NWP: purple
+- Features: blue
+- ML architecture: orange-yellow-ish
+- Tuner: orange-red
+
+Legend: BELOW the 3 plots (single shared legend)
 
 Outputs:
-- figures/Figure4_main_effects_RMSE_NSE_KGE_stackplot_REPLICATE_RANDOM.png/.pdf
-- figures/Figure4_main_effects_table_REPLICATE_RANDOM.csv
-
-Notes:
-- If 'replicate' is missing or has only one level per cell, the script
-  falls back to OLS (equivalent to the original script). This is reported
-  in the console output.
-- statsmodels MixedLM occasionally throws convergence warnings on small or
-  unbalanced cells; we catch those and report them per (horizon, metric).
+- figures/Figure4_main_effects_RMSE_NSE_KGE_stackplot.png/.pdf
+- figures/Figure4_main_effects_table.csv   (shares per metric per horizon)
 """
 
 from __future__ import annotations
 
 import argparse
-import warnings
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -37,13 +29,9 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# statsmodels for MixedLM
-import statsmodels.api as sm
-from statsmodels.regression.mixed_linear_model import MixedLM
-
 
 # -----------------------------
-# Utilities reused from the original script
+# Utilities: loading / detection
 # -----------------------------
 
 REQ_FACTOR_COLS = ["model", "nwp", "feat", "tuner"]
@@ -60,13 +48,16 @@ def _read_csv_header_only(p: Path) -> List[str]:
 def find_metrics_csv(tables_dir: Path, metric: str) -> Optional[Path]:
     csvs = sorted(tables_dir.glob("*.csv"))
     best, best_score = None, -1
+
     for p in csvs:
         cols = _read_csv_header_only(p)
         if not cols:
             continue
         colset = set(cols)
+
         long_ok = (REQ_LONG_COLS_MIN.issubset(colset) and (metric in colset))
         long_score = 100 if long_ok else 0
+
         wide_score = 0
         if set(REQ_FACTOR_COLS).issubset(colset):
             hits = 0
@@ -75,9 +66,11 @@ def find_metrics_csv(tables_dir: Path, metric: str) -> Optional[Path]:
                     hits += 1
             if hits >= 3:
                 wide_score = 50 + hits
+
         score = max(long_score, wide_score)
         if score > best_score:
             best_score, best = score, p
+
     return best
 
 
@@ -91,8 +84,12 @@ def load_runs_csv(runs_csv: Path) -> pd.DataFrame:
 
 def load_metrics_table(metrics_csv: Path, metric: str) -> pd.DataFrame:
     df = pd.read_csv(metrics_csv)
+
+    # long
     if "horizon" in df.columns and metric in df.columns and set(REQ_FACTOR_COLS).issubset(df.columns):
         return df
+
+    # wide -> long
     if set(REQ_FACTOR_COLS).issubset(df.columns):
         wide_cols = []
         for h in [1, 2, 3, 4, 5]:
@@ -100,9 +97,9 @@ def load_metrics_table(metrics_csv: Path, metric: str) -> pd.DataFrame:
                 if name in df.columns:
                     wide_cols.append((h, name))
                     break
+
         if wide_cols:
-            base_cols = [c for c in df.columns if c in REQ_FACTOR_COLS or c in
-                         ["replicate", "lag", "run_dir", "keras_path", "run_id"]]
+            base_cols = [c for c in df.columns if c in REQ_FACTOR_COLS or c in ["replicate", "lag", "run_dir", "keras_path", "run_id"]]
             long_rows = []
             for h, colname in wide_cols:
                 tmp = df[base_cols + [colname]].copy()
@@ -110,6 +107,7 @@ def load_metrics_table(metrics_csv: Path, metric: str) -> pd.DataFrame:
                 tmp["horizon"] = h
                 long_rows.append(tmp)
             return pd.concat(long_rows, ignore_index=True)
+
     raise ValueError(
         f"Could not interpret metrics CSV format: {metrics_csv}\n"
         f"Need either long (.., horizon, {metric}) or wide ({metric}_h1..)."
@@ -125,11 +123,13 @@ def smart_merge_runs_metrics(runs: pd.DataFrame, met: pd.DataFrame) -> pd.DataFr
         ["keras_path"],
         ["run_id"],
     ]
+
     for keys in key_sets:
         if all(k in runs.columns for k in keys) and all(k in met.columns for k in keys):
             merged = met.merge(runs.drop_duplicates(keys), on=keys, how="inner", suffixes=("", "_run"))
             if len(merged) > 0:
                 return merged
+
     raise RuntimeError(
         "Could not merge runs and metrics tables. "
         "Ensure both contain compatible identifiers (model,nwp,feat,tuner[,replicate/lag]) or run_dir/keras_path/run_id."
@@ -137,42 +137,8 @@ def smart_merge_runs_metrics(runs: pd.DataFrame, met: pd.DataFrame) -> pd.DataFr
 
 
 # -----------------------------
-# Mixed-effects partial SS
+# ANOVA-style main effects
 # -----------------------------
-
-def _design_matrix(df: pd.DataFrame, factors: List[str]):
-    """Build intercept + dummy columns; return (X, col_groups)."""
-    X_parts = [np.ones((len(df), 1), dtype=float)]
-    col_groups = {}
-    start = 1
-    for f in factors:
-        d = pd.get_dummies(df[f].astype(str), drop_first=True)
-        arr = d.to_numpy(dtype=float)
-        X_parts.append(arr)
-        col_groups[f] = list(range(start, start + arr.shape[1]))
-        start += arr.shape[1]
-    X = np.concatenate(X_parts, axis=1)
-    return X, col_groups
-
-
-def _fit_mixedlm_sse(X: np.ndarray, y: np.ndarray, groups: np.ndarray) -> Optional[float]:
-    """
-    Fit y = X beta + u_group + eps with random intercept per group.
-    Return residual SSE (sum of squared marginal residuals: y - X*beta).
-    Using marginal (not conditional) residuals so SSE is comparable across
-    nested models that share the same random-effect structure.
-    """
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            md = MixedLM(endog=y, exog=X, groups=groups)
-            res = md.fit(method="lbfgs", reml=False, disp=False)
-        beta = np.asarray(res.fe_params, dtype=float)
-        resid = y - X @ beta
-        return float(np.sum(resid * resid))
-    except Exception:
-        return None
-
 
 def _fit_ols_sse(X: np.ndarray, y: np.ndarray) -> float:
     beta, *_ = np.linalg.lstsq(X, y, rcond=None)
@@ -180,53 +146,45 @@ def _fit_ols_sse(X: np.ndarray, y: np.ndarray) -> float:
     return float(np.sum(resid * resid))
 
 
-def mixed_main_effects_eta2(
-    df_h: pd.DataFrame,
-    y_col: str,
-    factors: List[str],
-    group_col: str = "replicate",
-) -> Dict[str, float]:
+def anova_main_effects_eta2(df_h: pd.DataFrame, y_col: str, factors: List[str]) -> Dict[str, float]:
     """
-    Partial SS per fixed-effect factor in a mixed model with random intercept
-    on group_col. Falls back to OLS if mixed model cannot be fit or if
-    group_col is missing / has only one level.
+    Main-effect contributions via drop-one-factor partial SS:
+      SS_factor = SSE(reduced) - SSE(full)
+      eta2_factor = SS_factor / SST
     """
     y = df_h[y_col].astype(float).to_numpy()
     mask = np.isfinite(y)
     df2 = df_h.loc[mask, :].copy()
-    if len(df2) < 10:
+    y_full = df2[y_col].astype(float).to_numpy()
+
+    if len(y_full) < 10:
         return {f: np.nan for f in factors}
 
-    y_full = df2[y_col].astype(float).to_numpy()
+    # SST
     y_bar = float(np.mean(y_full))
     sst = float(np.sum((y_full - y_bar) ** 2))
     if sst <= 0:
         return {f: 0.0 for f in factors}
 
-    X_full, col_groups = _design_matrix(df2, factors)
+    # full design: intercept + dummies for all factors
+    X_parts = [np.ones((len(df2), 1), dtype=float)]
+    col_groups = {}
+    start = 1
+    for f in factors:
+        d = pd.get_dummies(df2[f].astype(str), drop_first=True)
+        arr = d.to_numpy(dtype=float)
+        X_parts.append(arr)
+        col_groups[f] = list(range(start, start + arr.shape[1]))
+        start += arr.shape[1]
 
-    use_mixed = (group_col in df2.columns) and (df2[group_col].nunique() >= 2)
-
-    if use_mixed:
-        groups = df2[group_col].astype(str).to_numpy()
-        sse_full = _fit_mixedlm_sse(X_full, y_full, groups)
-        if sse_full is None:
-            use_mixed = False  # fallback
-
-    if not use_mixed:
-        sse_full = _fit_ols_sse(X_full, y_full)
-        groups = None
+    X_full = np.concatenate(X_parts, axis=1)
+    sse_full = _fit_ols_sse(X_full, y_full)
 
     out = {}
     for f in factors:
         keep_cols = [0] + [j for ff in factors if ff != f for j in col_groups[ff]]
         X_red = X_full[:, keep_cols]
-        if use_mixed:
-            sse_red = _fit_mixedlm_sse(X_red, y_full, groups)
-            if sse_red is None:
-                sse_red = _fit_ols_sse(X_red, y_full)
-        else:
-            sse_red = _fit_ols_sse(X_red, y_full)
+        sse_red = _fit_ols_sse(X_red, y_full)
         ss_f = max(0.0, sse_red - sse_full)
         out[f] = ss_f / sst
 
@@ -251,28 +209,25 @@ def set_nature_style():
 
 
 # -----------------------------
-# Shares per horizon
+# Shares per horizon (stackplot payload)
 # -----------------------------
 
-def shares_by_horizon(
-    df: pd.DataFrame,
-    metric: str,
-    factors: List[str],
-    horizons=(1, 2, 3, 4, 5),
-    group_col: str = "replicate",
-) -> pd.DataFrame:
+def shares_by_horizon(df: pd.DataFrame, metric: str, factors: List[str], horizons=(1, 2, 3, 4, 5)) -> pd.DataFrame:
     rows = []
     for h in horizons:
         d_h = df[df["horizon"] == h].copy()
-        contrib = mixed_main_effects_eta2(d_h, y_col=metric, factors=factors, group_col=group_col)
+        contrib = anova_main_effects_eta2(d_h, y_col=metric, factors=factors)
+
         vals = np.array([contrib[f] for f in factors], dtype=float)
         vals = np.where(np.isfinite(vals), vals, 0.0)
         denom = float(vals.sum())
         shares = (vals / denom) if denom > 0 else np.zeros_like(vals)
+
         row = {"metric": metric, "horizon": h}
         for f, s in zip(factors, shares):
             row[f] = float(s)
         rows.append(row)
+
     return pd.DataFrame(rows)
 
 
@@ -288,8 +243,6 @@ def main():
     ap.add_argument("--nse_csv", type=str, default="")
     ap.add_argument("--kge_csv", type=str, default="")
     ap.add_argument("--fig_dir", type=str, default="figures")
-    ap.add_argument("--group_col", type=str, default="replicate",
-                    help="Column used as random-effect group (default: replicate).")
     args = ap.parse_args()
 
     analysis_out = Path(args.analysis_out)
@@ -320,51 +273,45 @@ def main():
     def load_merged(metric: str, m_csv: Path) -> pd.DataFrame:
         met = load_metrics_table(m_csv, metric=metric)
         df = smart_merge_runs_metrics(runs, met)
+
         df["horizon"] = pd.to_numeric(df["horizon"], errors="coerce")
         df = df.dropna(subset=["horizon", metric]).copy()
         df["horizon"] = df["horizon"].astype(int)
         df = df[df["horizon"].isin([1, 2, 3, 4, 5])].copy()
+
         for c in REQ_FACTOR_COLS:
             df[c] = df[c].astype(str)
-        if args.group_col in df.columns:
-            df[args.group_col] = df[args.group_col].astype(str)
+
         return df
 
     df_rmse = load_merged("RMSE", rmse_csv)
     df_nse  = load_merged("NSE",  nse_csv)
     df_kge  = load_merged("KGE",  kge_csv)
 
-    # Report whether group_col is usable
-    has_group = args.group_col in df_rmse.columns and df_rmse[args.group_col].nunique() >= 2
-    if has_group:
-        print(f"[INFO] Treating '{args.group_col}' as random effect "
-              f"({df_rmse[args.group_col].nunique()} levels).")
-    else:
-        print(f"[WARN] Column '{args.group_col}' missing or single-level; "
-              f"falling back to OLS (results will match figure4_final.py).")
-
     factors = ["nwp", "feat", "model", "tuner"]
     labels = ["NWP", "Features", "ML architecture", "Tuner"]
 
+    # Requested palette
     COLORS = {
-        "nwp":   "#8B55A0A0",
-        "feat":  "#3C81B39E",
-        "model": "#E69D009D",
-        "tuner": "#D55C009D",
+        "nwp":   "#8B55A0A0",  # purple
+        "feat":  "#3C81B39E",  # blue
+        "model": "#E69D009D",  # orange-yellow
+        "tuner": "#D55C009D",  # orange-red
     }
 
     set_nature_style()
 
-    tab_rmse = shares_by_horizon(df_rmse, "RMSE", factors=factors, group_col=args.group_col)
-    tab_nse  = shares_by_horizon(df_nse,  "NSE",  factors=factors, group_col=args.group_col)
-    tab_kge  = shares_by_horizon(df_kge,  "KGE",  factors=factors, group_col=args.group_col)
+    # Compute per-horizon shares (this is what you want for the stackplots)
+    tab_rmse = shares_by_horizon(df_rmse, "RMSE", factors=factors)
+    tab_nse  = shares_by_horizon(df_nse,  "NSE",  factors=factors)
+    tab_kge  = shares_by_horizon(df_kge,  "KGE",  factors=factors)
 
     table_all = pd.concat([tab_rmse, tab_nse, tab_kge], ignore_index=True)
-    out_table = fig_dir / "Figure4_main_effects_table_REPLICATE_RANDOM.csv"
+    out_table = fig_dir / "Figure4_main_effects_table.csv"
     table_all.to_csv(out_table, index=False)
 
     # -----------------------------
-    # Figure
+    # Figure: three panels (a,b,c) with stackplot
     # -----------------------------
     fig, axes = plt.subplots(1, 3, figsize=(12.6, 3.2), dpi=220, gridspec_kw={"wspace": 0.28})
 
@@ -374,9 +321,12 @@ def main():
         ("c", "KGE",  tab_kge),
     ]
 
+    # Keep a nice 1:1.5 feel per panel
     for ax in axes:
+        #ax.set_box_aspect(2 / 3)
         ax.set_box_aspect(6 / 7)
 
+    # Shared legend handles
     legend_handles = [plt.Rectangle((0, 0), 1, 1, color=COLORS[f], ec="none") for f in factors]
 
     for ax, (letter, metric_name, tab) in zip(axes, panels):
@@ -385,9 +335,11 @@ def main():
         y_stack = np.vstack([tab[f].to_numpy(dtype=float) for f in factors])
 
         ax.stackplot(
-            x, y_stack,
+            x,
+            y_stack,
             colors=[COLORS[f] for f in factors],
-            alpha=0.58, linewidth=0.0,
+            alpha=0.58,
+            linewidth=0.0,
         )
 
         ax.set_xlim(1, 5)
@@ -403,22 +355,23 @@ def main():
             ax.spines[s].set_linewidth(1.2)
             ax.spines[s].set_color("0.3")
         ax.set_title(metric_name)
-        ax.text(-0.10, 1.05, letter, transform=ax.transAxes,
-                fontweight="bold", fontsize=12, va="bottom")
+        ax.text(-0.10, 1.05, letter, transform=ax.transAxes, fontweight="bold", fontsize=12, va="bottom")
 
-    suffix = " — replicate as random effect" if has_group else " — OLS fallback"
-    fig.suptitle(f"Main-effect attribution{suffix}", y=1.02, fontsize=11)
-
+    # Legend BELOW all panels (single shared legend)
     fig.legend(
-        legend_handles, labels,
-        loc="lower center", ncol=4, frameon=False,
+        legend_handles,
+        labels,
+        loc="lower center",
+        ncol=4,
+        frameon=False,
         bbox_to_anchor=(0.5, -0.07),
     )
 
+    # leave room for legend at bottom
     fig.subplots_adjust(bottom=0.18)
 
-    out_png = fig_dir / "Figure4_main_effects_RMSE_NSE_KGE_stackplot_REPLICATE_RANDOM.png"
-    out_pdf = fig_dir / "Figure4_main_effects_RMSE_NSE_KGE_stackplot_REPLICATE_RANDOM.pdf"
+    out_png = fig_dir / "Figure4_main_effects_RMSE_NSE_KGE_stackplot.png"
+    out_pdf = fig_dir / "Figure4_main_effects_RMSE_NSE_KGE_stackplot.pdf"
     fig.savefig(out_png, bbox_inches="tight", dpi=1200)
     fig.savefig(out_pdf, bbox_inches="tight")
     plt.close(fig)

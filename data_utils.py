@@ -119,13 +119,9 @@ def prepare_data(data, target_scaled, target, lag, horizon, val_index, test_inde
             end_ix = i + ws
             # gather input exogenous sequence:
             # The original requested structure: combine lag previous exog values (from lead 1)
-            # plus the horizon exog values (one row per lead). We follow the pattern in the prompt.
-            try:
-                    # part A: lag rows from the lead-1 DataFrame, from i+horizon .. end_ix inclusive (lag rows)
-                    seq_x = data[0].iloc[i + horizon : end_ix + 1, :]  # shape (lag, n_features)
-            except Exception as e:
-                    # if indexing goes out of bounds, stop
-                    break
+
+            seq_x = data[0].iloc[i + horizon : end_ix + 1, :]  # shape (lag, n_features)
+
 
             # this will add (horizon-1) rows (one per future lead)
             for j in range(1, horizon):
@@ -182,16 +178,16 @@ file_path = 'data'
 # Variables and lead times
 DEFAULT_HORIZONS = [24, 48, 72, 96, 120]
 FEATURE_MAP = {
-      'Qp':     {'variables': ['tp_daily'],                         'seasonality': False, 'use_q': True},
-      'Qpt':    {'variables': ['tp_daily', 't2m_raw'],              'seasonality': False, 'use_q': True},
-      'Qpts':   {'variables': ['tp_daily', 't2m_raw', 'sd_daily'],  'seasonality': False, 'use_q': True},
-      'Qptsd':  {'variables': ['tp_daily', 't2m_raw', 'sd_daily'],  'seasonality': True,  'use_q': True},
+      'Qp':     {'variables': ['tp_daily'],                       'seasonality': False, 'use_q': True},
+      'Qpt':    {'variables': ['tp_daily', 't2m_raw'],            'seasonality': False, 'use_q': True},
+      'Qpts':   {'variables': ['tp_daily', 't2m_raw', 'sd_raw'],  'seasonality': False, 'use_q': True},
+      'Qptsd':  {'variables': ['tp_daily', 't2m_raw', 'sd_raw'],  'seasonality': True,  'use_q': True},
 }
-SUFFIX_MAP = {'t2m_raw': '_temp', 'tp_daily': '_precip', 'sd_daily': '_snow'}
+SUFFIX_MAP = {'t2m_raw': '_temp', 'tp_daily': '_precip', 'sd_raw': '_snow'}
 
 # Train/val/test split date
-val_start = '2022-07-01'
-test_start = '2023-01-01'
+val_start = '2023-01-01'
+test_start = '2023-10-01'
 
 # ----------------------------------
 # Main data pre-processing function

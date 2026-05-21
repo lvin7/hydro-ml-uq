@@ -292,19 +292,6 @@ def ve(y, yhat, eps=1e-12) -> float:
     return float((np.sum(hh) - np.sum(yy)) / denom)
 
 
-def atpe_2pct(y, yhat, peak_mask) -> float:
-    """
-    ATPE-2%: fraction of peak points where |error| <= 2% of observed.
-    peak_mask: boolean mask over time indices (same length as y)
-    """
-    m = _safe_mask(y, yhat) & peak_mask
-    if not np.any(m):
-        return np.nan
-    tol = 0.02 * np.abs(y[m])
-    ok = np.abs(yhat[m] - y[m]) <= tol
-    return float(np.mean(ok))
-
-
 def dt_peak(y, yhat) -> float:
     """
     dTpeak: time index difference between global observed peak and predicted peak.
@@ -429,7 +416,6 @@ def compute_metrics_per_horizon(y_true_2d: np.ndarray,
             "NSE": nse(y, yhat),
             "KGE": kge(y, yhat),
             "SCAS": scas(y, yhat),
-            "ATPE2": atpe_2pct(y, yhat, peak_mask),
             "dTpeak": dt_peak(y, yhat),
             "VE": ve(y, yhat),
         }
