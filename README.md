@@ -1,43 +1,62 @@
-# unc-2
+# HYDRO-ML-UQ: Machine Learning Workflow for Uncertainty Quantification in Streamflow Forecasting
 
-Code for training, analysing, and plotting the uncertainty-analysis experiments for multi-step discharge forecasting.
+Operational streamflow forecasts are essential for flood preparedness and reservoir management. However, predictive uncertainty is often poorly characterized, limiting the reliability of decisions based on these forecasts. This repository implements an **end-to-end multi-model uncertainty quantification (UQ) framework** for operational streamflow forecasting. Unlike standard approaches that treat uncertainty as a property of the predictive model alone, this framework decomposes and attributes uncertainty across the **entire forecasting workflow**: meteorological forcing choice, feature design, model architecture, hyperparameter optimization (HPO), and training variability.
+
+The framework enables systematic analysis of how uncertainty emerges, propagates, and shifts across forecasting lead times, providing actionable guidance for improving forecast reliability and decision-making.
+
+---
+
+## Workflow Overview
+
+![HYDRO-ML-UQ Workflow](figures/hydro_ml_uq_workflow.png)
+
+The workflow evaluates multiple combinations of:
+
+- **NWP forcings:** IFS, GFS, UKMO, GEM  
+- **Feature sets:** Q, Q+p, Q+p+T, Q+p+T+s, Q+p+T+s+d  
+- **Model architectures:** LSTM, TCN, TKAN, MLP  
+- **HPO strategies:** Random Search, Bayesian Optimization, Hyperband, Evolutionary  
+- **Training replicates:** multiple independent runs to capture variability
+
+Ensembles explore all combinations, systematically quantifying uncertainty contributions from each stage.
+
+---
 
 ## Repository Contents
 
-- `run_experiments.py`: trains the model grid and writes trained models, scalers, metrics, and tuning summaries.
-- `full_pipeline_analysis.py`: scans trained runs, computes deterministic and probabilistic ensemble summaries, selects the retained ensemble, and writes analysis tables.
-- `figure2.py` to `figure5.py`: regenerate the paper figures from retained runs and analysis outputs.
-- `data_utils.py`: data loading, cleaning, synchronization, scaling, and train/validation/test splitting.
-- `analysis_utils.py`: shared model-loading, caching, metrics, ensemble, and attribution helpers.
-- `hp_tuning.py`, `models.py`, `metrics.py`: training-time model, tuning, and diagnostic helpers.
+- `run_experiments.py`: trains the full model grid, writes trained models, scalers, metrics, and tuning summaries  
+- `data_utils.py`: data loading, cleaning, synchronization, scaling, train/validation/test splitting 
+- `hp_tuning.py`, `models.py`, `metrics.py`: training, HPO, and diagnostic utilities 
+- `full_pipeline_analysis.py`: scans trained runs, computes ensemble summaries, selects retained models, and generates analysis tables  
+- `analysis_utils.py`: model-loading, caching, metrics, ensemble, and attribution helpers  
+- `figure2.py` – `figure5.py`: regenerate paper figures from retained runs  
+  
 
-Generated artifacts are intentionally not tracked in git. Store large data/model/output folders in the Zenodo record or another archive:
+Store large data/model/output folders:
 
-- `data/`
-- `final-models/` or `models/`
-- `analysis_out_v4/`
-- `figures/`
-- `pred_cache/`, `pred_cache_v4/`
+- `data/`  
+- `models/`  
+- `final-models/`  
+- `analysis_out_v4/`  
+- `figures/`  
+- `pred_cache/`, `pred_cache_v4/`  
 
-## Environment
+---
 
-Python 3.11 is recommended.
+## Environment Setup
+
+Recommended: Python 3.11
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\activate   # Windows
+# source .venv/bin/activate  # Linux/macOS
 pip install -r requirements.txt
-```
-
-On Linux/macOS, activate the environment with:
-
-```bash
-source .venv/bin/activate
 ```
 
 ## Expected Data Layout
 
-By default, scripts expect cleaned input files in `data/`:
+Before running the scripts, your `data/` folder should have cleaned input CSVs:
 
 ```text
 data/
@@ -45,39 +64,9 @@ data/
   clean_<nwp>_<variable>_lead_<lead>h.csv
 ```
 
-The default NWP sources are `ifs`, `ukmo`, `gfs`, and `gem`. The default variables are `tp_daily`, `t2m_raw`, and `sd_raw`; lead times are `24`, `48`, `72`, `96`, and `120` hours.
-
-## Reproducing the Analysis
-
-If trained models are not already available, run the experiment grid:
-
-```bash
-python run_experiments.py --outdir final-models
-```
-
-Then compute analysis tables and prediction caches:
-
-```bash
-python full_pipeline_analysis.py
-```
-
-Regenerate figures:
-
-```bash
-python figure2.py
-python figure3.py
-python figure4.py
-python figure5.py
-```
-
-The default workflow writes tables under `analysis_out_v4/tables/`, plots under `analysis_out_v4/plots/`, figure files under `figures/`, and prediction caches under `pred_cache/` or `pred_cache_v4/`.
-
-## Notes For Archival Use
-
-- The scripts use relative paths by default and can be redirected with command-line arguments.
-- Large generated artifacts should be included in the Zenodo archive if exact reproduction without retraining is required.
-- `metrics.py` is still used by `run_experiments.py` for training diagnostics and should remain in the repository.
-
-## License
-
-This code is released under the MIT License. See `LICENSE`.
+Where
+- **`Q.csv`** → observed discharge  
+- **`clean_<nwp>_<variable>_lead_<lead>h.csv`** → preprocessed NWP forcings  
+- **Default NWP sources:** ifs, ukmo, gfs, gem  
+- **Default variables:** tp_daily, t2m_raw, sd_raw  
+- **Lead times:** 24, 48, 72, 96, 120 hours
