@@ -1,3 +1,25 @@
+"""
+Full-pipeline analysis script.
+
+Produces, under analysis_out_v4/:
+  - tables/runs_scanned.csv
+  - tables/metrics_per_model_per_horizon.csv
+  - tables/runs_kept_v4.csv
+  - tables/metrics_kept_v4_per_model_per_horizon.csv
+  - tables/v4_selection_summary.csv
+  - tables/v4_selection_flags.csv
+  - tables/ensemble_deterministic_metrics_mean_v4.csv
+  - tables/ensemble_deterministic_metrics_mean_with_IQR_v4.csv
+  - tables/ensemble_prob_metrics_v4.csv
+  - tables/overall_metrics_kept_v4_by_run.csv
+  - tables/group_compact_overall_kept_v4__by_{factor}.csv
+  - tables/group_compact_by_horizon_kept_v4__by_{factor}.csv
+  - plots/violin__{metric}__kept_v4__h1to5.png
+
+Cached predictions are written to pred_cache_v4/ and reused by the figure
+scripts (figure2.py, figure3.py, figure5.py).
+"""
+
 from __future__ import annotations
 
 import gc
@@ -21,17 +43,18 @@ FACTOR_LABEL = {
     "replicate": "replicate",
 }
 
+
 # -----------------------------
 # Small plotting utilities
 # -----------------------------
-def save_violin_by_horizon(df: pd.DataFrame, metric: str, out_png: Path, title: str, horizons=(1,2,3,4,5)):
+def save_violin_by_horizon(df: pd.DataFrame, metric: str, out_png: Path, title: str, horizons=(1, 2, 3, 4, 5)):
     d = df[["horizon", metric]].dropna()
     data = [d[d["horizon"] == h][metric].values for h in horizons]
     if all(len(x) == 0 for x in data):
         return
     plt.figure(figsize=(9, 4.5))
     plt.violinplot(data, showmeans=True, showmedians=False, showextrema=True)
-    plt.xticks(range(1, len(horizons)+1), [str(h) for h in horizons])
+    plt.xticks(range(1, len(horizons) + 1), [str(h) for h in horizons])
     plt.xlabel("forecast horizon (days ahead)")
     plt.ylabel(metric)
     plt.title(title)
@@ -62,7 +85,6 @@ def group_compact_table(df: pd.DataFrame, group_col: str, metrics: list[str], ho
                 row[f"{m}_IQR"] = f"{q25:.3f}–{q75:.3f}"
         rows.append(row)
     out = pd.DataFrame(rows)
-    # prefer sort by NSE if present
     if "NSE_median" in out.columns:
         out = out.sort_values("NSE_median", ascending=False, na_position="last")
     return out
@@ -70,9 +92,9 @@ def group_compact_table(df: pd.DataFrame, group_col: str, metrics: list[str], ho
 
 def add_iqr_cols_per_horizon(df_det: pd.DataFrame, df_metrics: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     """
-    df_det: ensemble mean metrics per horizon
-    df_metrics: per-model per-horizon metrics (kept subset)
-    Adds q25/q50/q75 and formatted IQR string per metric, per horizon.
+    df_det: ensemble mean metrics per horizon.
+    df_metrics: per-model per-horizon metrics (kept subset).
+    Adds q25/q50/q75 and a formatted IQR string per metric, per horizon.
     """
     out = df_det.copy()
     for h in out["horizon"].tolist():
@@ -95,61 +117,14 @@ def add_iqr_cols_per_horizon(df_det: pd.DataFrame, df_metrics: pd.DataFrame, col
     return out
 
 
-def save_stack_main_inter_unexp(df_main_sum: pd.DataFrame, df_ols_totals: pd.DataFrame, out_png: Path, title: str):
-    """
-    df_main_sum columns: horizon, explained_main (sum eta2 main effects)
-    df_ols_totals columns: horizon, R2_full (explained main+interactions)
-    Plot stack: main (absolute), interactions(total), unexplained.
-    """
-    d = df_main_sum.merge(df_ols_totals[["horizon", "R2_full"]], on="horizon", how="left").copy()
-    d["explained_main"] = d["explained_main"].fillna(0.0)
-    d["R2_full"] = d["R2_full"].fillna(0.0)
-
-    d["explained_interactions"] = np.clip(d["R2_full"] - d["explained_main"], 0.0, 1.0)
-    d["unexplained"] = np.clip(1.0 - d["R2_full"], 0.0, 1.0)
-
-    x = d["horizon"].values
-    y1 = d["explained_main"].values
-    y2 = d["explained_interactions"].values
-    y3 = d["unexplained"].values
-
-    plt.figure(figsize=(9, 5))
-    plt.stackplot(x, y1, y2, y3, labels=["Main effects", "Interactions (total)", "Unexplained"])
-    plt.xticks(x, [str(int(v)) for v in x])
-    plt.ylim(0, 1)
-    plt.xlabel("forecast horizon (days ahead)")
-    plt.ylabel("variance fraction")
-    plt.title(title)
-    plt.legend(loc="upper left", fontsize=8, ncols=2)
-    plt.tight_layout()
-    plt.savefig(out_png, dpi=170)
-    plt.close()
-
-    # explained-only normalized
-    d["explained_total"] = np.clip(d["R2_full"], 1e-12, 1.0)
-    d["main_norm"] = d["explained_main"] / d["explained_total"]
-    d["inter_norm"] = d["explained_interactions"] / d["explained_total"]
-
-    plt.figure(figsize=(9, 5))
-    plt.stackplot(x, d["main_norm"].values, d["inter_norm"].values, labels=["Main effects", "Interactions (total)"])
-    plt.xticks(x, [str(int(v)) for v in x])
-    plt.ylim(0, 1)
-    plt.xlabel("forecast horizon (days ahead)")
-    plt.ylabel("normalized explained variance")
-    plt.title(title + " (normalized explained only)")
-    plt.legend(loc="upper left", fontsize=8, ncols=2)
-    plt.tight_layout()
-    plt.savefig(out_png.with_name(out_png.stem + "__normalized_explained.png"), dpi=170)
-    plt.close()
-
-
 # -----------------------------
-# v4 selection: union-of-worst quartiles computed on full ensemble
+# v4 selection: union-of-worst quartiles computed on the full ensemble
 # -----------------------------
 def v4_keep_ids(df_overall: pd.DataFrame, q=0.25):
     """
-    df_overall columns: run_id, NSE_mean, KGE_mean, RMSE_mean
-    Worst sets computed on FULL ensemble. Size exactly floor(N*q) using deterministic tie-break by run_id.
+    df_overall columns: run_id, NSE_mean, KGE_mean, RMSE_mean.
+    Worst sets are computed on the FULL ensemble. Each set is exactly floor(N*q)
+    with deterministic tie-breaking by run_id.
     """
     d = df_overall.copy()
     N = len(d)
@@ -168,17 +143,17 @@ def v4_keep_ids(df_overall: pd.DataFrame, q=0.25):
 
     summary = pd.DataFrame([
         {"step": 1, "metric": "NSE",  "removed_this_step": len(removed_1),
-         "removed_cumulative": len(removed_1), "pct_removed_cum": 100*len(removed_1)/N},
+         "removed_cumulative": len(removed_1), "pct_removed_cum": 100 * len(removed_1) / N},
         {"step": 2, "metric": "KGE",  "removed_this_step": len(removed_2),
-         "removed_cumulative": len(removed_1 | worst_kge), "pct_removed_cum": 100*len(removed_1 | worst_kge)/N},
+         "removed_cumulative": len(removed_1 | worst_kge), "pct_removed_cum": 100 * len(removed_1 | worst_kge) / N},
         {"step": 3, "metric": "RMSE", "removed_this_step": len(removed_3),
-         "removed_cumulative": len(removed_union), "pct_removed_cum": 100*len(removed_union)/N},
+         "removed_cumulative": len(removed_union), "pct_removed_cum": 100 * len(removed_union) / N},
         {"step": 4, "metric": "FINAL", "removed_this_step": 0,
-         "removed_cumulative": len(removed_union), "pct_removed_cum": 100*len(removed_union)/N,
-         "kept": len(keep_ids), "pct_kept": 100*len(keep_ids)/N},
+         "removed_cumulative": len(removed_union), "pct_removed_cum": 100 * len(removed_union) / N,
+         "kept": len(keep_ids), "pct_kept": 100 * len(keep_ids) / N},
     ])
 
-    flagged = d[["run_id","NSE_mean","KGE_mean","RMSE_mean"]].copy()
+    flagged = d[["run_id", "NSE_mean", "KGE_mean", "RMSE_mean"]].copy()
     flagged["worst25_NSE"] = flagged["run_id"].isin(worst_nse)
     flagged["worst25_KGE"] = flagged["run_id"].isin(worst_kge)
     flagged["worst25_RMSE"] = flagged["run_id"].isin(worst_rmse)
@@ -195,7 +170,7 @@ def main():
     OUTDIR = Path("analysis_out_v4")
     PLOTS = OUTDIR / "plots"
     TABLES = OUTDIR / "tables"
-    PRED_CACHE = Path("pred_cache")  # reuse existing cache
+    PRED_CACHE = Path("pred_cache_v4")
     OUTDIR.mkdir(exist_ok=True)
     PLOTS.mkdir(exist_ok=True)
     TABLES.mkdir(exist_ok=True)
@@ -212,13 +187,6 @@ def main():
     # deterministic metrics where we want IQR across models
     DET_IQR_METRICS = ["NSE", "KGE", "RMSE", "MAE", "MAPE", "r"]
 
-    # interactions to include (publishable set)
-    INTERACTIONS_SELECTED = [("model","nwp"), ("model","feat"), ("nwp","feat"), ("model","tuner")]
-
-    # factors for main effects
-    FACTORS_FULL = ["model", "nwp", "feat", "tuner", "replicate"]
-    FACTORS_NO_REP = ["model", "nwp", "feat", "tuner"]
-
     # -----------------------------
     # Verify required analysis_utils hooks exist
     # -----------------------------
@@ -230,13 +198,6 @@ def main():
     missing = [f for f in required if not hasattr(au, f)]
     if missing:
         raise RuntimeError(f"analysis_utils.py is missing required functions: {missing}")
-
-    # OLS attribution helper (for interactions)
-    if not hasattr(au, "ols_attribution_by_horizon"):
-        raise RuntimeError("analysis_utils.py missing ols_attribution_by_horizon (v3 patch).")
-
-    # main-effects eta2 helper is optional; we will fallback to OLS main-only if absent
-    has_eta2 = hasattr(au, "attribution_by_horizon")
 
     # -----------------------------
     # 0) Load or compute df_runs / df_metrics
@@ -294,7 +255,7 @@ def main():
                 rows.append(rec)
 
             if (i + 1) % 50 == 0:
-                print(f"[INFO] processed {i+1}/{len(df_runs)}")
+                print(f"[INFO] processed {i + 1}/{len(df_runs)}")
 
         df_metrics = pd.DataFrame(rows)
         df_metrics.to_csv(df_metrics_path, index=False)
@@ -303,7 +264,7 @@ def main():
     # 1) v4 selection on FULL ensemble (1024)
     # -----------------------------
     df_overall = (df_metrics.groupby("run_id", as_index=False)
-                  .agg(NSE_mean=("NSE","mean"), KGE_mean=("KGE","mean"), RMSE_mean=("RMSE","mean")))
+                  .agg(NSE_mean=("NSE", "mean"), KGE_mean=("KGE", "mean"), RMSE_mean=("RMSE", "mean")))
     keep_ids, sel_summary, sel_flagged = v4_keep_ids(df_overall, q=Q_WORST)
 
     sel_summary.to_csv(TABLES / "v4_selection_summary.csv", index=False)
@@ -312,7 +273,7 @@ def main():
     df_runs_kept = df_runs[df_runs["run_id"].isin(keep_ids)].copy()
     df_metrics_kept = df_metrics[df_metrics["run_id"].isin(keep_ids)].copy()
 
-    print(f"[INFO] v4 kept: {len(keep_ids)}/{len(df_overall)} = {100*len(keep_ids)/len(df_overall):.1f}%")
+    print(f"[INFO] v4 kept: {len(keep_ids)}/{len(df_overall)} = {100 * len(keep_ids) / len(df_overall):.1f}%")
 
     df_runs_kept.to_csv(TABLES / "runs_kept_v4.csv", index=False)
     df_metrics_kept.to_csv(TABLES / "metrics_kept_v4_per_model_per_horizon.csv", index=False)
@@ -327,7 +288,7 @@ def main():
         if yp is None:
             raise RuntimeError(f"Missing cached prediction for run_id={rid}.")
         preds.append(yp)
-    preds = np.stack(preds, axis=0)  # (M,N,H)
+    preds = np.stack(preds, axis=0)  # (M, N, H)
 
     # deterministic ensemble mean evaluated as a single forecast
     det_rows = []
@@ -335,28 +296,30 @@ def main():
         y_obs = y_test_ref[:, [h]]
         mean_pred = np.nanmean(preds[:, :, h], axis=0).reshape(-1, 1)
         per = au.compute_metrics_per_horizon(y_obs, mean_pred, peak_q=PEAK_Q)[0]
-        det_rows.append({"horizon": h+1, **per, "n_models": preds.shape[0]})
+        det_rows.append({"horizon": h + 1, **per, "n_models": preds.shape[0]})
 
     df_det_ens = pd.DataFrame(det_rows)
     df_det_ens.to_csv(TABLES / "ensemble_deterministic_metrics_mean_v4.csv", index=False)
 
-    # add IQR across models (kept subset) for deterministic metrics
-    df_det_ens_iqr = add_iqr_cols_per_horizon(df_det_ens, df_metrics_kept, cols=[m for m in DET_IQR_METRICS if m in df_metrics_kept.columns])
+    # IQR across models (kept subset) for deterministic metrics
+    df_det_ens_iqr = add_iqr_cols_per_horizon(
+        df_det_ens, df_metrics_kept,
+        cols=[m for m in DET_IQR_METRICS if m in df_metrics_kept.columns],
+    )
     df_det_ens_iqr.to_csv(TABLES / "ensemble_deterministic_metrics_mean_with_IQR_v4.csv", index=False)
 
     # probabilistic interval metrics via ensemble_summary
-    ens = au.ensemble_summary(y_test_ref, preds, alpha=ALPHA)  # list/dict per horizon
-    prob_rows = [{"horizon": h+1, **ens[h], "n_models": preds.shape[0]} for h in range(HORIZON)]
+    ens = au.ensemble_summary(y_test_ref, preds, alpha=ALPHA)
+    prob_rows = [{"horizon": h + 1, **ens[h], "n_models": preds.shape[0]} for h in range(HORIZON)]
     df_prob = pd.DataFrame(prob_rows)
 
-    # make interval column robust
+    # robust column naming for interval-score
     if "IntervalSc" not in df_prob.columns:
         if "IntervalScore" in df_prob.columns:
             df_prob = df_prob.rename(columns={"IntervalScore": "IntervalSc"})
         elif "interval_score" in df_prob.columns:
             df_prob = df_prob.rename(columns={"interval_score": "IntervalSc"})
 
-    # keep only what exists
     prob_cols = [c for c in ["horizon", "CRPS", "IntervalSc", "PICP", "MPIW", "n_models"] if c in df_prob.columns]
     df_prob = df_prob[prob_cols]
     df_prob.to_csv(TABLES / "ensemble_prob_metrics_v4.csv", index=False)
@@ -364,27 +327,26 @@ def main():
     # -----------------------------
     # 3) Violin plots vs horizon (kept subset)
     # -----------------------------
-    violin_metrics = [m for m in ["NSE","KGE","RMSE","MAE","MAPE","r","SCAS"] if m in df_metrics_kept.columns]
+    violin_metrics = [m for m in ["NSE", "KGE", "RMSE", "MAE", "MAPE", "r", "SCAS"] if m in df_metrics_kept.columns]
     for m in violin_metrics:
         save_violin_by_horizon(
             df_metrics_kept, metric=m,
             out_png=PLOTS / f"violin__{m}__kept_v4__h1to5.png",
-            title=f"{m} | kept subset (v4 union-of-worst-25% removal) | distribution across horizons (1–5 days ahead)"
+            title=f"{m} | kept subset (v4 union-of-worst-25% removal) | distribution across horizons (1–5 days ahead)",
         )
 
     # -----------------------------
     # 4) Grouped compact tables (publishable)
     # -----------------------------
-    headline = [m for m in ["NSE","KGE","RMSE","MAE","MAPE","r"] if m in df_metrics_kept.columns]
+    headline = [m for m in ["NSE", "KGE", "RMSE", "MAE", "MAPE", "r"] if m in df_metrics_kept.columns]
 
-    # overall per-run mean (for overall grouped summaries)
     overall_run = (df_metrics_kept
-        .groupby(["run_id","model","nwp","feat","tuner","replicate"], as_index=False)
+        .groupby(["run_id", "model", "nwp", "feat", "tuner", "replicate"], as_index=False)
         .agg({m: "mean" for m in headline})
     )
     overall_run.to_csv(TABLES / "overall_metrics_kept_v4_by_run.csv", index=False)
 
-    for f in ["tuner","model","nwp","feat","replicate"]:
+    for f in ["tuner", "model", "nwp", "feat", "replicate"]:
         # overall table
         tab = group_compact_table(overall_run, group_col=f, metrics=headline, horizon=None)
         tab.insert(0, "factor", FACTOR_LABEL.get(f, f))
@@ -392,63 +354,18 @@ def main():
 
         # per-horizon table
         tabs = []
-        for h in range(1, HORIZON+1):
+        for h in range(1, HORIZON + 1):
             th = group_compact_table(df_metrics_kept, group_col=f, metrics=headline, horizon=h)
             th.insert(0, "horizon", h)
             th.insert(1, "factor", FACTOR_LABEL.get(f, f))
             tabs.append(th)
         pd.concat(tabs, ignore_index=True).to_csv(TABLES / f"group_compact_by_horizon_kept_v4__by_{f}.csv", index=False)
 
-    # -----------------------------
-    # 5) Attribution: main effects + interactions (with/without replicate)
-    # -----------------------------
-    def run_attr(metric: str, factors: list[str], tag: str):
-        # main effects explained
-        if has_eta2:
-            df_eta2 = au.attribution_by_horizon(df_metrics_kept, metric=metric, factors=factors, horizons=(1,2,3,4,5))
-            df_eta2.to_csv(TABLES / f"attr_eta2_abs__{metric}__{tag}.csv", index=False)
-            main_sum = (df_eta2.groupby("horizon", as_index=False)["eta2"].sum()
-                        .rename(columns={"eta2": "explained_main"}))
-        else:
-            # fallback: use OLS main-only drop-one totals as main explained (R2)
-            df_ols_main = au.ols_attribution_by_horizon(df_metrics_kept, metric=metric, main_factors=factors, interactions=None, horizons=(1,2,3,4,5))
-            df_ols_main.to_csv(TABLES / f"attr_ols__{metric}__main_only__{tag}.csv", index=False)
-            totals = df_ols_main[df_ols_main["term"] == "__TOTAL__"][["horizon","R2_full"]].copy()
-            main_sum = totals.rename(columns={"R2_full": "explained_main"})
-
-        main_sum.to_csv(TABLES / f"attr_explained_main__{metric}__{tag}.csv", index=False)
-
-        # interactions (selected)
-        df_ols_sel = au.ols_attribution_by_horizon(df_metrics_kept, metric=metric, main_factors=factors, interactions=INTERACTIONS_SELECTED, horizons=(1,2,3,4,5))
-        df_ols_sel.to_csv(TABLES / f"attr_ols__{metric}__selected_interactions__{tag}.csv", index=False)
-
-        totals_sel = df_ols_sel[df_ols_sel["term"] == "__TOTAL__"][["horizon","R2_full","unexplained","frac"]].copy()
-        totals_sel = totals_sel.rename(columns={"frac": "sum_contrib_dropone"})
-        totals_sel.to_csv(TABLES / f"attr_ols_totals__{metric}__selected_interactions__{tag}.csv", index=False)
-
-        # plot main/inter/unexplained (absolute + normalized explained)
-        save_stack_main_inter_unexp(
-            df_main_sum=main_sum,
-            df_ols_totals=totals_sel[["horizon","R2_full"]],
-            out_png=PLOTS / f"attr_stack__main_inter_unexp__{metric}__{tag}.png",
-            title=f"Variance decomposition (main vs interactions) | metric={metric} | kept subset (v4) | factors: {', '.join([FACTOR_LABEL.get(x,x) for x in factors])}"
-        )
-
-        # explained summary (publishable)
-        expl = main_sum.merge(totals_sel[["horizon","R2_full","unexplained"]], on="horizon", how="left")
-        expl["explained_interactions_total"] = np.clip(expl["R2_full"] - expl["explained_main"], 0.0, 1.0)
-        expl.to_csv(TABLES / f"attr_explained_summary__{metric}__{tag}.csv", index=False)
-
-    # run for core metrics (as you want: horizon-wise)
-    for met in [m for m in ["NSE","RMSE","KGE"] if m in df_metrics_kept.columns]:
-        run_attr(met, FACTORS_FULL, tag="with_replicate")
-        run_attr(met, FACTORS_NO_REP, tag="no_replicate")
-
     print("\n[DONE] v4 outputs written to:")
     print("  ", str(OUTDIR))
-    print("  Tables:", str(TABLES))
-    print("  Plots :", str(PLOTS))
-    print("  Pred cache:", str(PRED_CACHE))
+    print("   Tables:", str(TABLES))
+    print("   Plots :", str(PLOTS))
+    print("   Pred cache:", str(PRED_CACHE))
 
 
 if __name__ == "__main__":

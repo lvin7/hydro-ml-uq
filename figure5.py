@@ -1,63 +1,37 @@
 """
 Figure 5 — Cost vs. RMSE Pareto trade-off across HPO algorithms.
 
-This script produces Figure 5 in two stages:
+Two stages, controlled by a cache:
 
-  1. Compute stage: load each retained pipeline's trained .keras model, predict on
-     the test set, compute RMSE for the chosen horizon, and read tuning cost from
-     each pipeline's tuning_summary.json. Save the per-pipeline (cost, RMSE)
-     table to figures/Figure5_points.csv.
+  1. Compute stage: for each retained pipeline, look up the cached test-set
+     prediction (written by full_pipeline_analysis.py), compute RMSE at the
+     chosen horizon, and read the tuning cost from tuning_summary.json. Save
+     the per-pipeline (cost, RMSE) table to figures/Figure5_points.csv.
 
   2. Plot stage: read Figure5_points.csv, apply quantile trimming, draw the
-     compute-cost violin (panel a) and the cost-vs-RMSE scatter with Pareto front
-     (panel b), and save Figure5_v4_cost_vs_rmse_trim_shaded.{png,pdf}.
+     compute-cost violin (panel a) and the cost-vs-RMSE scatter with Pareto
+     front (panel b), and save Figure5_v4_cost_vs_rmse_trim_shaded.{png,pdf}.
 
-The compute stage is slow (loads many trained models). It is skipped automatically
-if Figure5_points.csv already exists. Pass --recompute to force re-computation.
+The compute stage is skipped automatically if Figure5_points.csv already
+exists. Pass --recompute to force re-computation.
+
+Prerequisite for the compute stage: run full_pipeline_analysis.py first to
+populate pred_cache_v4/ with the test-set predictions.
 """
 
 from __future__ import annotations
 
 import argparse
-import gc
 import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import tensorflow as tf
 from matplotlib.patches import Ellipse
 
 from data_utils import data_prep
-from tcn import TCN
-from tkan import TKAN
-
-
-# =========================================================
-# Custom loss (only needed for safe deserialization)
-# =========================================================
-class PinballLoss(tf.keras.losses.Loss):
-    def __init__(self, quantile, name="pinball_loss"):
-        super().__init__(name=name)
-        self.quantile = quantile
-
-    def call(self, y_true, y_pred):
-        error = y_true - y_pred
-        return tf.reduce_mean(tf.maximum(self.quantile * error, (self.quantile - 1) * error))
-
-    def get_config(self):
-        return {"quantile": self.quantile, "name": self.name}
-
-
-CUSTOM_OBJECTS = {
-    "TCN": TCN,
-    "Custom>TCN": TCN,
-    "TKAN": TKAN,
-    "Custom>TKAN": TKAN,
-    "PinballLoss": PinballLoss,
-    "pinball_loss": PinballLoss,
-}
+import analysis_utils as au
 
 
 # =========================================================
@@ -99,32 +73,23 @@ def _safe_read_json(p: Path) -> dict:
         return {}
 
 
-def rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    y_true = np.asarray(y_true, dtype=float).reshape(-1)
-    y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
-    m = np.isfinite(y_true) & np.isfinite(y_pred)
-    if not np.any(m):
-        return np.nan
-    e = y_true[m] - y_pred[m]
-    return float(np.sqrt(np.mean(e * e)))
-
-
-def rmse_over_horizon(y_test: np.ndarray, y_pred: np.ndarray, horizon: int = 1, agg: str = "single") -> float:
+def rmse_at_horizon(y_test: np.ndarray, y_pred: np.ndarray, horizon: int = 1, agg: str = "single") -> float:
+    """RMSE at a specific horizon (1-indexed), or mean RMSE across horizons."""
     y_test = np.asarray(y_test, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
     H = y_test.shape[1]
 
     if agg == "mean":
-        vals = [rmse(y_test[:, h], y_pred[:, h]) for h in range(H)]
-        return float(np.nanmean(vals))
+        return float(np.nanmean([au.rmse(y_test[:, h], y_pred[:, h]) for h in range(H)]))
 
     h = int(horizon)
     if h < 1 or h > H:
-        raise ValueError(f"horizon must be in [1,{H}]")
-    return rmse(y_test[:, h - 1], y_pred[:, h - 1])
+        raise ValueError(f"horizon must be in [1, {H}]")
+    return au.rmse(y_test[:, h - 1], y_pred[:, h - 1])
 
 
 def load_cost_hours(row: pd.Series) -> float | None:
+    """Read total tuning time (in hours) from tuning_summary.json."""
     if "tuning_summary_path" in row.index and pd.notna(row["tuning_summary_path"]):
         p = _resolve_path(row["tuning_summary_path"])
     else:
@@ -151,13 +116,15 @@ def load_cost_hours(row: pd.Series) -> float | None:
 
 
 # =========================================================
-# Compute stage — build Figure5_points.csv
+# Compute stage — build Figure5_points.csv from cached predictions
 # =========================================================
 def compute_points(args) -> pd.DataFrame:
     runs_csv = Path(args.runs_csv)
+    pred_cache = Path(args.pred_cache)
+
     df = pd.read_csv(runs_csv)
 
-    required = {"model", "nwp", "feat", "replicate", "tuner", "run_dir"}
+    required = {"model", "nwp", "feat", "replicate", "tuner", "run_dir", "run_id"}
     missing = required - set(df.columns)
     if missing:
         raise RuntimeError(f"runs_csv missing columns: {sorted(missing)}")
@@ -170,86 +137,70 @@ def compute_points(args) -> pd.DataFrame:
     if args.max_models and args.max_models > 0:
         df = df.head(int(args.max_models)).copy()
 
-    # Cache test data per (nwp, feat)
-    data_cache: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]] = {}
+    # Cache y_test per (nwp, feat) — at most 4 x 4 = 16 unique combinations.
+    y_test_cache: dict[tuple[str, str], np.ndarray] = {}
 
     rows = []
     n_missing_cost = 0
-    n_fail_model = 0
+    n_missing_pred = 0
+    n_shape_fail = 0
 
-    print(f"[INFO] Computing RMSE from .keras predictions for {len(df)} runs...")
-    print("[INFO] This requires the trained models and may take a while.")
+    print(f"[INFO] Reading cached predictions from {pred_cache} for {len(df)} runs...")
 
-    for k, row in df.iterrows():
+    for _, row in df.iterrows():
         cost_h = load_cost_hours(row)
         if cost_h is None or not np.isfinite(cost_h):
             n_missing_cost += 1
             continue
 
+        # Load y_test once per (nwp, feat)
         key = (str(row["nwp"]), str(row["feat"]))
-        if key not in data_cache:
-            _, _, _, _, X_test, y_test, _ = data_prep(
+        if key not in y_test_cache:
+            _, _, _, _, _, y_test, _ = data_prep(
                 nwp=key[0],
                 target="Q",
                 vars=key[1],
                 val_start=args.val_start,
                 test_start=args.test_start,
             )
-            data_cache[key] = (np.asarray(X_test, dtype=float), np.asarray(y_test, dtype=float))
+            y_test_cache[key] = np.asarray(y_test, dtype=float)
 
-        X_test, y_test = data_cache[key]
+        y_test = y_test_cache[key]
 
-        if "keras_path" in df.columns and pd.notna(row.get("keras_path", np.nan)):
-            keras_path = _resolve_path(row["keras_path"])
-        else:
-            run_dir = _resolve_path(row["run_dir"])
-            cands = list(run_dir.glob("*.keras"))
-            keras_path = cands[0] if cands else None
-
-        if keras_path is None or not keras_path.exists():
-            n_fail_model += 1
+        # Load cached prediction
+        y_pred = au.load_prediction(str(pred_cache), str(row["run_id"]))
+        if y_pred is None:
+            n_missing_pred += 1
             continue
 
-        model = None
-        try:
-            model = tf.keras.models.load_model(keras_path, compile=False, custom_objects=CUSTOM_OBJECTS)
-            yp = model.predict(X_test, batch_size=args.batch_size, verbose=0)
-            yp = np.asarray(yp, dtype=float)
+        y_pred = np.asarray(y_pred, dtype=float)
+        if y_pred.shape != y_test.shape:
+            n_shape_fail += 1
+            continue
 
-            if yp.shape != y_test.shape:
-                n_fail_model += 1
-                continue
-
-            r = rmse_over_horizon(y_test, yp, horizon=args.horizon, agg=args.rmse_agg)
-            rows.append({
-                "tuner": str(row["tuner"]),
-                "tuner_name": nice_tuner_name(row["tuner"]),
-                "cost_hours": float(cost_h),
-                "rmse": float(r),
-            })
-        except Exception:
-            n_fail_model += 1
-        finally:
-            try:
-                tf.keras.backend.clear_session()
-            except Exception:
-                pass
-            if model is not None:
-                del model
-            gc.collect()
+        r = rmse_at_horizon(y_test, y_pred, horizon=args.horizon, agg=args.rmse_agg)
+        rows.append({
+            "tuner": str(row["tuner"]),
+            "tuner_name": nice_tuner_name(row["tuner"]),
+            "cost_hours": float(cost_h),
+            "rmse": float(r),
+        })
 
     dff = pd.DataFrame(rows)
 
     print(f"[INFO] usable points: {len(dff)}")
     if n_missing_cost:
         print(f"[WARN] missing tuning cost for {n_missing_cost} runs.")
-    if n_fail_model:
-        print(f"[WARN] failed model load/predict/shape for {n_fail_model} runs.")
+    if n_missing_pred:
+        print(f"[WARN] missing cached prediction for {n_missing_pred} runs "
+              f"(run full_pipeline_analysis.py to populate {pred_cache}).")
+    if n_shape_fail:
+        print(f"[WARN] prediction-shape mismatch for {n_shape_fail} runs.")
 
     if len(dff) < 10:
         raise RuntimeError(
-            "Too few usable points to build Figure 5. "
-            "Check that keras_path and tuning_summary.json are available."
+            f"Too few usable points to build Figure 5 (got {len(dff)}). "
+            f"Ensure {pred_cache} is populated by running full_pipeline_analysis.py first."
         )
 
     return dff
@@ -522,12 +473,13 @@ def main():
 
     # Compute stage
     ap.add_argument("--runs_csv", type=str, default="analysis_out_v4/tables/runs_kept_v4.csv")
+    ap.add_argument("--pred_cache", type=str, default="pred_cache_v4",
+                    help="Directory with cached predictions (populated by full_pipeline_analysis.py).")
     ap.add_argument("--val_start", type=str, default="2023-01-01")
     ap.add_argument("--test_start", type=str, default="2023-10-01")
     ap.add_argument("--tuners", nargs="+", default=["random", "bayesian", "hyperband", "evol"])
     ap.add_argument("--horizon", type=int, default=1)
     ap.add_argument("--rmse_agg", choices=["single", "mean"], default="single")
-    ap.add_argument("--batch_size", type=int, default=256)
     ap.add_argument("--max_models", type=int, default=0,
                     help="Limit number of models processed (0 = all). Useful for quick tests.")
 
@@ -560,7 +512,7 @@ def main():
         if points_csv.exists():
             print(f"[INFO] --recompute set; overwriting {points_csv}")
         else:
-            print(f"[INFO] No cached points file found; computing from trained models.")
+            print(f"[INFO] No cached points file found; computing from cached predictions.")
         df_points = compute_points(args)
         df_points.to_csv(points_csv, index=False)
         print(f"[DONE] Saved points table: {points_csv}")

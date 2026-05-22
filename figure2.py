@@ -6,8 +6,7 @@ Three panels in one figure:
   (a) Full test period: observed discharge, ensemble mean (H=1) with 95% and
       50% predictive bands. CRPS and PICP95 annotated.
   (b) Zoomed event window around two prolonged-flood peaks: observed discharge
-      and ensemble forecasts at H=1 and H=5, each with 95% and 50% bands.
-      Forecasts are placed at their VERIFICATION dates (issue date + h-1 days).
+      and ensemble forecasts at H=1, with 95% and 50% bands.
   (c) Six fan charts (3 issue offsets x 2 peaks). Shared y-axis across all six.
 
 Date alignment:
@@ -16,12 +15,14 @@ Date alignment:
   - For horizon h, the verification date is dates_test + (h-1) days.
 
 Central line throughout is the ENSEMBLE MEAN (not the median).
+
+Prerequisite: run full_pipeline_analysis.py first to populate pred_cache_v4/
+with the test-set predictions.
 """
 
 from __future__ import annotations
 
 import argparse
-import gc
 from pathlib import Path
 from typing import Optional
 
@@ -29,7 +30,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-import tensorflow as tf
 
 from data_utils import (
     load_exog_data,
@@ -43,50 +43,15 @@ from data_utils import (
     SUFFIX_MAP,
     file_path as DATA_FILE_PATH,
 )
-from tcn import TCN
-from tkan import TKAN
+import analysis_utils as au
 
 
 # =========================================================
-# Custom objects (for load_model)
+# I/O
 # =========================================================
-class PinballLoss(tf.keras.losses.Loss):
-    def __init__(self, quantile, name="pinball_loss"):
-        super().__init__(name=name)
-        self.quantile = float(quantile)
-
-    def call(self, y_true, y_pred):
-        err = y_true - y_pred
-        return tf.reduce_mean(
-            tf.maximum(self.quantile * err, (self.quantile - 1.0) * err)
-        )
-
-
-CUSTOM_OBJECTS = {
-    "TCN": TCN,
-    "TKAN": TKAN,
-    "PinballLoss": PinballLoss,
-}
-
-
-# =========================================================
-# I/O helpers
-# =========================================================
-def run_id_from_row(row: pd.Series) -> str:
-    return f"{row['model']}_{row['nwp']}_{row['feat']}_{row['tuner']}_{int(row['replicate'])}"
-
-
-def pred_path_canonical(pred_cache_root: Path, run_dir: str) -> Path:
-    return pred_cache_root / Path(run_dir) / "y_pred.npy"
-
-
-def pred_path_flat(pred_cache_root: Path, run_id: str) -> Path:
-    return pred_cache_root / f"{run_id}.npy"
-
-
 def load_runs_table(runs_csv: str | Path) -> pd.DataFrame:
     df = pd.read_csv(runs_csv)
-    required = {"model", "nwp", "feat", "replicate", "tuner", "run_dir", "keras_path"}
+    required = {"model", "nwp", "feat", "replicate", "tuner", "run_id"}
     miss = required - set(df.columns)
     if miss:
         raise RuntimeError(f"Missing columns in runs CSV: {sorted(miss)}")
@@ -196,6 +161,7 @@ def data_prep_with_dates(
     test_start="2023-10-01",
     suffix_map=SUFFIX_MAP,
 ):
+    """Same as data_utils.data_prep but also returns aligned test-set dates."""
     variables = FEATURE_MAP[vars]["variables"]
 
     exog_dfs = load_exog_data(file_path, nwp, variables, horizons, datetime_col_index)
@@ -208,7 +174,7 @@ def data_prep_with_dates(
 
     exog_dfs, target_df = sync_data(exog_dfs, target_df)
     exogs = merge_exog(exog_dfs, variables, horizons, suffix_map)
-    exog_scaled, endo_scaled, scalers = scale_data(exogs, target_df, val_start)
+    exog_scaled, endo_scaled, _scaler = scale_data(exogs, target_df, val_start)
 
     out = prepare_data_with_dates(
         exog_scaled,
@@ -222,77 +188,8 @@ def data_prep_with_dates(
         seasonality=FEATURE_MAP[vars]["seasonality"],
     )
 
-    X_train, y_train, d_train, X_val, y_val, d_val, X_test, y_test, d_test = out
-    return X_train, y_train, d_train, X_val, y_val, d_val, X_test, y_test, d_test, scalers
-
-
-def load_or_build_pred(
-    row: pd.Series,
-    pred_cache_root: Path,
-    data_cache: dict[tuple[str, str], tuple[np.ndarray, np.ndarray, pd.DatetimeIndex]],
-    val_start: str,
-    test_start: str,
-    batch_size: int = 256,
-    overwrite: bool = False,
-    lag: int = 3,
-    file_path: str = DATA_FILE_PATH,
-) -> np.ndarray:
-    run_dir = str(row["run_dir"])
-    nwp = str(row["nwp"])
-    feat = str(row["feat"])
-    keras_path = Path(str(row["keras_path"]))
-    rid = run_id_from_row(row)
-
-    key = (nwp, feat)
-    if key not in data_cache:
-        _, _, _, _, _, _, X_test, y_test, d_test, _ = data_prep_with_dates(
-            nwp=nwp,
-            target="Q",
-            file_path=file_path,
-            vars=feat,
-            lag=lag,
-            val_start=val_start,
-            test_start=test_start,
-        )
-        data_cache[key] = (
-            np.asarray(X_test, dtype=float),
-            np.asarray(y_test, dtype=float),
-            pd.DatetimeIndex(d_test),
-        )
-
-    p_can = pred_path_canonical(pred_cache_root, run_dir)
-    p_flat = pred_path_flat(pred_cache_root, rid)
-
-    if not overwrite:
-        if p_can.exists():
-            return np.asarray(np.load(p_can, allow_pickle=False), dtype=float)
-        if p_flat.exists():
-            return np.asarray(np.load(p_flat, allow_pickle=False), dtype=float)
-
-    X_test, _y_test, _d_test = data_cache[key]
-
-    if not keras_path.is_absolute():
-        keras_path = Path.cwd() / keras_path
-
-    model = tf.keras.models.load_model(keras_path, compile=False, custom_objects=CUSTOM_OBJECTS)
-    yp = model.predict(X_test, batch_size=batch_size, verbose=0)
-    yp = np.asarray(yp, dtype=float)
-
-    p_can.parent.mkdir(parents=True, exist_ok=True)
-    np.save(p_can, yp)
-    try:
-        np.save(p_flat, yp)
-    except Exception:
-        pass
-
-    try:
-        tf.keras.backend.clear_session()
-    except Exception:
-        pass
-    del model
-    gc.collect()
-
-    return yp
+    _, _, _, _, _, _, _, y_test, d_test = out
+    return np.asarray(y_test, dtype=float), pd.DatetimeIndex(d_test)
 
 
 # =========================================================
@@ -307,7 +204,7 @@ def discharge_timeline_and_dates(
 
     Convention:
       y_true[i, 0] verifies on dates_h1[i]
-      y_disc[t]  is observed discharge on dates_disc[t]
+      y_disc[t]   is observed discharge on dates_disc[t]
       dates_disc[t] = dates_h1[0] + (t - 1) days   (i.e. dates_disc[1] == dates_h1[0])
 
     So y_disc[i+1] == y_true[i, 0] and y_disc[i+h] is the H=h verification target.
@@ -331,39 +228,6 @@ def discharge_timeline_and_dates(
 def horizon_dates(dates_h1: pd.DatetimeIndex, h: int) -> pd.DatetimeIndex:
     """Verification dates for horizon h: dates_h1 shifted by (h-1) days."""
     return pd.DatetimeIndex(dates_h1 + pd.to_timedelta(h - 1, unit="D"))
-
-
-# =========================================================
-# Probabilistic metrics
-# =========================================================
-def crps_ensemble(y: np.ndarray, x: np.ndarray) -> float:
-    y = np.asarray(y).reshape(-1)
-    x = np.asarray(x)
-    M, N = x.shape
-    m = np.isfinite(y) & np.all(np.isfinite(x), axis=0)
-    if not np.any(m):
-        return np.nan
-    yv = y[m]
-    xv = x[:, m]
-
-    term1 = np.mean(np.abs(xv - yv[None, :]), axis=0)
-
-    xs = np.sort(xv, axis=0)
-    i = np.arange(1, M + 1).reshape(M, 1)
-    w = (2 * i - M - 1).astype(float)
-    mean_abs_diff = 2.0 * np.sum(w * xs, axis=0) / (M * M)
-
-    return float(np.mean(term1 - 0.5 * mean_abs_diff))
-
-
-def picp(y: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> float:
-    y = np.asarray(y).reshape(-1)
-    lo = np.asarray(lo).reshape(-1)
-    hi = np.asarray(hi).reshape(-1)
-    m = np.isfinite(y) & np.isfinite(lo) & np.isfinite(hi)
-    if not np.any(m):
-        return np.nan
-    return float(np.mean((y[m] >= lo[m]) & (y[m] <= hi[m])))
 
 
 # =========================================================
@@ -496,9 +360,7 @@ def fan_payload(
             obs_hist[k] = y_disc[t]
 
     samples = preds[:, i0, :leads]  # (M, leads)
-    q025, q25, q75, q975 = np.nanquantile(
-        samples, [0.025, 0.25, 0.75, 0.975], axis=0
-    )
+    q025, q25, q75, q975 = np.nanquantile(samples, [0.025, 0.25, 0.75, 0.975], axis=0)
     mean_line = np.nanmean(samples, axis=0)  # central line = ensemble MEAN
 
     obs_now = y_disc[t0] if (0 <= t0 < len(y_disc)) else np.nan
@@ -556,14 +418,13 @@ def shared_ylim(payloads: list[dict], pad_frac: float = 0.06) -> Optional[tuple[
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs_csv", type=str, default="analysis_out_v4/tables/runs_kept_v4.csv")
-    ap.add_argument("--pred_cache", type=str, default="pred_cache_v4")
+    ap.add_argument("--pred_cache", type=str, default="pred_cache_v4",
+                    help="Directory with cached predictions (populated by full_pipeline_analysis.py).")
     ap.add_argument("--outdir", type=str, default="figures")
     ap.add_argument("--file_path", type=str, default=DATA_FILE_PATH)
     ap.add_argument("--val_start", type=str, default="2023-01-01")
     ap.add_argument("--test_start", type=str, default="2023-10-01")
     ap.add_argument("--lag", type=int, default=3)
-    ap.add_argument("--overwrite_cache", action="store_true")
-    ap.add_argument("--batch_size", type=int, default=256)
 
     ap.add_argument("--event_tstart", type=int, default=50)
     ap.add_argument("--peak_threshold", type=float, default=200.0)
@@ -579,9 +440,7 @@ def main():
     pred_cache = Path(args.pred_cache)
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-    pred_cache.mkdir(parents=True, exist_ok=True)
 
-    # Slightly larger fonts than before for PDF readability
     plt.rcParams.update({
         "font.size": 12,
         "axes.titlesize": 13,
@@ -598,42 +457,65 @@ def main():
     # -----------------------------
     df_runs = load_runs_table(runs_csv)
 
-    data_cache: dict[tuple[str, str], tuple[np.ndarray, np.ndarray, pd.DatetimeIndex]] = {}
+    # y_test + dates cache per (nwp, feat) — at most 16 unique combinations
+    yd_cache: dict[tuple[str, str], tuple[np.ndarray, pd.DatetimeIndex]] = {}
+
     preds_list = []
     y_ref = None
     dates_ref = None
+    n_missing_pred = 0
+    n_shape_fail = 0
 
-    print(f"[INFO] Building/reading prediction cache at: {pred_cache}")
+    print(f"[INFO] Reading cached predictions from {pred_cache} for {len(df_runs)} runs.")
 
-    for i, row in df_runs.iterrows():
-        yp = load_or_build_pred(
-            row=row,
-            pred_cache_root=pred_cache,
-            data_cache=data_cache,
-            val_start=args.val_start,
-            test_start=args.test_start,
-            batch_size=args.batch_size,
-            overwrite=args.overwrite_cache,
-            lag=args.lag,
-            file_path=args.file_path,
-        )
-        preds_list.append(yp)
-
+    for _, row in df_runs.iterrows():
         key = (str(row["nwp"]), str(row["feat"]))
-        _X, y_test_k, d_test_k = data_cache[key]
+        if key not in yd_cache:
+            y_k, d_k = data_prep_with_dates(
+                nwp=key[0],
+                target="Q",
+                file_path=args.file_path,
+                vars=key[1],
+                lag=args.lag,
+                val_start=args.val_start,
+                test_start=args.test_start,
+            )
+            yd_cache[key] = (y_k, d_k)
+
+        y_test_k, d_test_k = yd_cache[key]
+
+        yp = au.load_prediction(str(pred_cache), str(row["run_id"]))
+        if yp is None:
+            n_missing_pred += 1
+            continue
+        yp = np.asarray(yp, dtype=float)
+
+        if yp.shape != y_test_k.shape:
+            n_shape_fail += 1
+            continue
+
         if y_ref is None:
             y_ref = y_test_k.copy()
             dates_ref = d_test_k.copy()
         else:
-            if y_test_k.shape != y_ref.shape or not np.allclose(
-                y_test_k, y_ref, equal_nan=True
-            ):
+            if y_test_k.shape != y_ref.shape or not np.allclose(y_test_k, y_ref, equal_nan=True):
                 print(f"[WARN] y_test differs for key={key}. Using first y_test.")
             if len(d_test_k) != len(dates_ref) or not np.all(d_test_k == dates_ref):
                 print(f"[WARN] dates_test differs for key={key}.")
 
-        if (i + 1) % 50 == 0:
-            print(f"[INFO] processed {i+1}/{len(df_runs)}")
+        preds_list.append(yp)
+
+    if n_missing_pred:
+        print(f"[WARN] missing cached prediction for {n_missing_pred} runs "
+              f"(run full_pipeline_analysis.py to populate {pred_cache}).")
+    if n_shape_fail:
+        print(f"[WARN] prediction-shape mismatch for {n_shape_fail} runs.")
+
+    if not preds_list:
+        raise RuntimeError(
+            f"No cached predictions found in {pred_cache}. "
+            f"Run full_pipeline_analysis.py first."
+        )
 
     preds = np.stack(preds_list, axis=0)  # (M, N, H)
     y_test = np.asarray(y_ref, dtype=float)
@@ -654,8 +536,8 @@ def main():
     lo50, hi50 = np.nanquantile(ens_h1, [0.25, 0.75], axis=0)
     lo95, hi95 = np.nanquantile(ens_h1, [0.025, 0.975], axis=0)
 
-    crps1 = crps_ensemble(y_test[:, 0], ens_h1)
-    picp95 = picp(y_test[:, 0], lo95, hi95)
+    crps1 = au.crps_from_samples(y_test[:, 0], ens_h1)
+    picp95 = au.picp(y_test[:, 0], lo95, hi95)
 
     # -----------------------------
     # Event window (peaks on y_disc; dates_disc[p] is the date of peak)
@@ -666,9 +548,7 @@ def main():
         peak_thr=args.peak_threshold,
         dip_thr=args.dip_threshold,
     )
-    ws_t, we_t = build_event_window_include_p2(
-        y_disc, p1, p2, max_len=args.max_event_len
-    )
+    ws_t, we_t = build_event_window_include_p2(y_disc, p1, p2, max_len=args.max_event_len)
     ve_event = volumetric_error_event(preds, y_disc, ws_t, we_t, Hmax=min(5, H))
 
     d_win_lo = dates_disc[ws_t]
@@ -698,7 +578,7 @@ def main():
         payloads_p1.append(pl1)
         payloads_p2.append(pl2)
 
-    # SHARED y-limits across all six fan panels (consistency!)
+    # SHARED y-limits across all six fan panels (consistency)
     fan_ylim = shared_ylim(payloads_p1 + payloads_p2)
 
     # -----------------------------
@@ -726,19 +606,14 @@ def main():
     central_color = "#1f77b4"
     outer_color = "#1f77b4"
     inner_color = "#ff7f0e"
-    #h5_color = "#d95f02"
 
     # =========================================================
     # (a) Full test period, h=1
     # =========================================================
     ax_a.plot(dates_test, y_test[:, 0], color=obs_color, lw=1.25, label="Observed")
     ax_a.plot(dates_test, mean_h1, color=central_color, lw=1.6, label="Ensemble mean")
-    ax_a.fill_between(
-        dates_test, lo95, hi95, color=outer_color, alpha=0.20, label="95% band"
-    )
-    ax_a.fill_between(
-        dates_test, lo50, hi50, color=inner_color, alpha=0.30, label="50% band"
-    )
+    ax_a.fill_between(dates_test, lo95, hi95, color=outer_color, alpha=0.20, label="95% band")
+    ax_a.fill_between(dates_test, lo50, hi50, color=inner_color, alpha=0.30, label="50% band")
     ax_a.set_title("Full test period — ensemble mean and predictive intervals (h=1)")
     ax_a.set_xlabel("Date")
     ax_a.set_ylabel(r"Discharge (m$^3$/s)")
@@ -749,43 +624,34 @@ def main():
         transform=ax_a.transAxes, va="top", ha="center",
         bbox=dict(boxstyle="round,pad=0.35", fc="white", ec="0.85", alpha=0.95),
     )
-    ax_a.text(
-        -0.06, 1.04, "a", transform=ax_a.transAxes,
-        fontweight="bold", fontsize=18, va="bottom",
-    )
+    ax_a.text(-0.06, 1.04, "a", transform=ax_a.transAxes,
+              fontweight="bold", fontsize=18, va="bottom")
     ax_a.xaxis.set_major_locator(mdates.AutoDateLocator())
     ax_a.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
 
     # =========================================================
     # (b) Zoomed event window with h=1 only
     # =========================================================
-    # Observed segment within the window (use dates_disc / y_disc)
     t_win = np.arange(ws_t, we_t + 1)
     d_win = dates_disc[t_win]
     y_obs_win = y_disc[t_win]
     ax_b.plot(d_win, y_obs_win, color=obs_color, lw=1.25)
 
-    # H=1 forecast at verification dates (dates_test for h=1)
-    ens_h1_b = preds[:, :, 0]
-    mean_h1_b = np.nanmean(ens_h1_b, axis=0)
-    lo95_h1_b, hi95_h1_b = np.nanquantile(ens_h1_b, [0.025, 0.975], axis=0)
-    lo50_h1_b, hi50_h1_b = np.nanquantile(ens_h1_b, [0.25, 0.75], axis=0)
+    # H=1 forecast at verification dates
     d_h1 = horizon_dates(dates_test, 1)
     keep = (d_h1 >= d_win_lo) & (d_h1 <= d_win_hi)
+    lo95_b = np.nanquantile(preds[:, :, 0], 0.025, axis=0)
+    hi95_b = np.nanquantile(preds[:, :, 0], 0.975, axis=0)
+    lo50_b = np.nanquantile(preds[:, :, 0], 0.25, axis=0)
+    hi50_b = np.nanquantile(preds[:, :, 0], 0.75, axis=0)
+    mean_h1_b = np.nanmean(preds[:, :, 0], axis=0)
 
-    ax_b.plot(
-        d_h1[keep], mean_h1_b[keep],
-        color=central_color, lw=1.8,
-    )
-    ax_b.fill_between(
-        d_h1[keep], lo95_h1_b[keep], hi95_h1_b[keep],
-        color=outer_color, alpha=0.20, linewidth=0,
-    )
-    ax_b.fill_between(
-        d_h1[keep], lo50_h1_b[keep], hi50_h1_b[keep],
-        color=inner_color, alpha=0.30, linewidth=0,
-    )
-    
+    ax_b.plot(d_h1[keep], mean_h1_b[keep], color=central_color, lw=1.8)
+    ax_b.fill_between(d_h1[keep], lo95_b[keep], hi95_b[keep],
+                      color=outer_color, alpha=0.20, linewidth=0)
+    ax_b.fill_between(d_h1[keep], lo50_b[keep], hi50_b[keep],
+                      color=inner_color, alpha=0.30, linewidth=0)
+
     # Mark peaks
     for k, dp in enumerate([d_p1, d_p2], start=1):
         if d_win_lo <= dp <= d_win_hi:
@@ -793,19 +659,15 @@ def main():
             t_peak = p1 if k == 1 else p2
             yy = y_disc[t_peak]
             if np.isfinite(yy):
-                ax_b.text(
-                    dp + pd.Timedelta(hours=8), yy,
-                    f"Peak {k}", fontsize=11, color="0.30", va="bottom",
-                )
+                ax_b.text(dp + pd.Timedelta(hours=8), yy,
+                          f"Peak {k}", fontsize=11, color="0.30", va="bottom")
 
     ax_b.set_xlim(d_win_lo, d_win_hi)
     ax_b.set_title("Zoomed: Prolonged high-flow event (h=1)")
     ax_b.set_xlabel("Date")
     ax_b.set_ylabel(r"Discharge (m$^3$/s)")
-    ax_b.text(
-        -0.06, 1.04, "b", transform=ax_b.transAxes,
-        fontweight="bold", fontsize=18, va="bottom",
-    )
+    ax_b.text(-0.06, 1.04, "b", transform=ax_b.transAxes,
+              fontweight="bold", fontsize=18, va="bottom")
     ax_b.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=8))
     ax_b.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
 
@@ -825,18 +687,12 @@ def main():
 
             ax.axvline(0, color="0.65", lw=0.9)
 
-            # Bands and central (mean) line
-            ax.fill_between(
-                pl["x_future"], pl["q025"], pl["q975"],
-                color=outer_color, alpha=0.20, linewidth=0,
-            )
-            ax.fill_between(
-                pl["x_future"], pl["q25"], pl["q75"],
-                color=inner_color, alpha=0.30, linewidth=0,
-            )
+            ax.fill_between(pl["x_future"], pl["q025"], pl["q975"],
+                            color=outer_color, alpha=0.20, linewidth=0)
+            ax.fill_between(pl["x_future"], pl["q25"], pl["q75"],
+                            color=inner_color, alpha=0.30, linewidth=0)
             ax.plot(pl["x_future"], pl["mean"], color=central_color, lw=1.5)
 
-            # Observed past + future on one line
             x_all = np.concatenate([pl["x_hist"], pl["obs_future_x"]])
             y_all = np.concatenate([pl["obs_hist"], pl["obs_future"]])
             ax.plot(x_all, y_all, color=obs_color, lw=0.95, marker="o", ms=2.4, alpha=0.9)
@@ -845,11 +701,8 @@ def main():
             if fan_ylim is not None:
                 ax.set_ylim(*fan_ylim)
 
-            # Label issue offset
-            ax.text(
-                0.05, 0.92, f"t = peak − {d} day(s)",
-                transform=ax.transAxes, ha="left", va="top", fontsize=11,
-            )
+            ax.text(0.05, 0.92, f"t = peak − {d} day(s)",
+                    transform=ax.transAxes, ha="left", va="top", fontsize=11)
 
             if r < 2:
                 ax.set_xticklabels([])
@@ -860,10 +713,8 @@ def main():
     ax_c[2][1].set_xlabel("Days relative to prediction")
     ax_c[1][0].set_ylabel(r"Discharge (m$^3$/s)")
 
-    ax_c_container.text(
-        -0.06, 1.04, "c", transform=ax_c_container.transAxes,
-        fontweight="bold", fontsize=18, va="bottom",
-    )
+    ax_c_container.text(-0.06, 1.04, "c", transform=ax_c_container.transAxes,
+                        fontweight="bold", fontsize=18, va="bottom")
 
     # =========================================================
     # Save
@@ -880,8 +731,7 @@ def main():
     print(f"[INFO] Window: {d_win_lo.date()} → {d_win_hi.date()}")
     print("\n[EVENT VE% over prolonged high-flow window]")
     for h in range(1, min(5, H) + 1):
-        ve = ve_event[h]
-        print(f"  h={h}: {ve:+.2f}%")
+        print(f"  h={h}: {ve_event[h]:+.2f}%")
 
 
 if __name__ == "__main__":

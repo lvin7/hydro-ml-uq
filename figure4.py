@@ -1,4 +1,4 @@
-# figure4_main_effects_3metrics_stackplot.py
+
 """
 Figure 4 (refined, as requested):
 
@@ -30,10 +30,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 
-# -----------------------------
-# Utilities: loading / detection
-# -----------------------------
-
 REQ_FACTOR_COLS = ["model", "nwp", "feat", "tuner"]
 REQ_LONG_COLS_MIN = set(REQ_FACTOR_COLS + ["horizon"])
 
@@ -55,7 +51,7 @@ def find_metrics_csv(tables_dir: Path, metric: str) -> Optional[Path]:
             continue
         colset = set(cols)
 
-        long_ok = (REQ_LONG_COLS_MIN.issubset(colset) and (metric in colset))
+        long_ok = REQ_LONG_COLS_MIN.issubset(colset) and metric in colset
         long_score = 100 if long_ok else 0
 
         wide_score = 0
@@ -99,7 +95,12 @@ def load_metrics_table(metrics_csv: Path, metric: str) -> pd.DataFrame:
                     break
 
         if wide_cols:
-            base_cols = [c for c in df.columns if c in REQ_FACTOR_COLS or c in ["replicate", "lag", "run_dir", "keras_path", "run_id"]]
+            base_cols = [
+                c
+                for c in df.columns
+                if c in REQ_FACTOR_COLS
+                or c in ["replicate", "lag", "run_dir", "keras_path", "run_id"]
+            ]
             long_rows = []
             for h, colname in wide_cols:
                 tmp = df[base_cols + [colname]].copy()
@@ -126,7 +127,12 @@ def smart_merge_runs_metrics(runs: pd.DataFrame, met: pd.DataFrame) -> pd.DataFr
 
     for keys in key_sets:
         if all(k in runs.columns for k in keys) and all(k in met.columns for k in keys):
-            merged = met.merge(runs.drop_duplicates(keys), on=keys, how="inner", suffixes=("", "_run"))
+            merged = met.merge(
+                runs.drop_duplicates(keys),
+                on=keys,
+                how="inner",
+                suffixes=("", "_run"),
+            )
             if len(merged) > 0:
                 return merged
 
@@ -160,7 +166,6 @@ def anova_main_effects_eta2(df_h: pd.DataFrame, y_col: str, factors: List[str]) 
     if len(y_full) < 10:
         return {f: np.nan for f in factors}
 
-    # SST
     y_bar = float(np.mean(y_full))
     sst = float(np.sum((y_full - y_bar) ** 2))
     if sst <= 0:
@@ -212,7 +217,12 @@ def set_nature_style():
 # Shares per horizon (stackplot payload)
 # -----------------------------
 
-def shares_by_horizon(df: pd.DataFrame, metric: str, factors: List[str], horizons=(1, 2, 3, 4, 5)) -> pd.DataFrame:
+def shares_by_horizon(
+    df: pd.DataFrame,
+    metric: str,
+    factors: List[str],
+    horizons=(1, 2, 3, 4, 5),
+) -> pd.DataFrame:
     rows = []
     for h in horizons:
         d_h = df[df["horizon"] == h].copy()
@@ -263,12 +273,15 @@ def main():
             return p
         p = find_metrics_csv(tables_dir, metric)
         if p is None:
-            raise FileNotFoundError(f"Could not auto-detect {metric} metrics CSV in {tables_dir}. Pass --{metric.lower()}_csv.")
+            raise FileNotFoundError(
+                f"Could not auto-detect {metric} metrics CSV in {tables_dir}. "
+                f"Pass --{metric.lower()}_csv."
+            )
         return p
 
     rmse_csv = resolve_metric_csv("RMSE", args.rmse_csv)
-    nse_csv  = resolve_metric_csv("NSE",  args.nse_csv)
-    kge_csv  = resolve_metric_csv("KGE",  args.kge_csv)
+    nse_csv = resolve_metric_csv("NSE", args.nse_csv)
+    kge_csv = resolve_metric_csv("KGE", args.kge_csv)
 
     def load_merged(metric: str, m_csv: Path) -> pd.DataFrame:
         met = load_metrics_table(m_csv, metric=metric)
@@ -285,8 +298,8 @@ def main():
         return df
 
     df_rmse = load_merged("RMSE", rmse_csv)
-    df_nse  = load_merged("NSE",  nse_csv)
-    df_kge  = load_merged("KGE",  kge_csv)
+    df_nse = load_merged("NSE", nse_csv)
+    df_kge = load_merged("KGE", kge_csv)
 
     factors = ["nwp", "feat", "model", "tuner"]
     labels = ["NWP", "Features", "ML architecture", "Tuner"]
@@ -303,8 +316,8 @@ def main():
 
     # Compute per-horizon shares (this is what you want for the stackplots)
     tab_rmse = shares_by_horizon(df_rmse, "RMSE", factors=factors)
-    tab_nse  = shares_by_horizon(df_nse,  "NSE",  factors=factors)
-    tab_kge  = shares_by_horizon(df_kge,  "KGE",  factors=factors)
+    tab_nse = shares_by_horizon(df_nse, "NSE", factors=factors)
+    tab_kge = shares_by_horizon(df_kge, "KGE", factors=factors)
 
     table_all = pd.concat([tab_rmse, tab_nse, tab_kge], ignore_index=True)
     out_table = fig_dir / "Figure4_main_effects_table.csv"
@@ -313,7 +326,13 @@ def main():
     # -----------------------------
     # Figure: three panels (a,b,c) with stackplot
     # -----------------------------
-    fig, axes = plt.subplots(1, 3, figsize=(12.6, 3.2), dpi=220, gridspec_kw={"wspace": 0.28})
+    fig, axes = plt.subplots(
+        1,
+        3,
+        figsize=(12.6, 3.2),
+        dpi=220,
+        gridspec_kw={"wspace": 0.28},
+    )
 
     panels = [
         ("a", "RMSE", tab_rmse),
@@ -323,11 +342,13 @@ def main():
 
     # Keep a nice 1:1.5 feel per panel
     for ax in axes:
-        #ax.set_box_aspect(2 / 3)
         ax.set_box_aspect(6 / 7)
 
     # Shared legend handles
-    legend_handles = [plt.Rectangle((0, 0), 1, 1, color=COLORS[f], ec="none") for f in factors]
+    legend_handles = [
+        plt.Rectangle((0, 0), 1, 1, color=COLORS[f], ec="none")
+        for f in factors
+    ]
 
     for ax, (letter, metric_name, tab) in zip(axes, panels):
         tab = tab.sort_values("horizon")
