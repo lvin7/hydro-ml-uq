@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "HYDRO-ML-UQ: Uncertainty Quantification Workflow for Machine-Learning-based Streamflow Forecasting"
+version: v1.0.1
+doi: 10.5281/zenodo.20346106
+date-released: 2026-05-22
+url: "https://github.com/lvin7/hydro-ml-uq"
+repository-code: "https://github.com/lvin7/hydro-ml-uq"
+license: MIT
+authors:
+  - family-names: Vinokić
+    given-names: Luka
+    affiliation: "Institute for Artificial Intelligence R&D of Serbia"
+  - family-names: Dotlić
+    given-names: Milan
+    affiliation: "Institute for Artificial Intelligence R&D of Serbia"
+  - family-names: Samac
+    given-names: Ana
+    affiliation: "Institute for Artificial Intelligence R&D of Serbia"
+  - family-names: Prodanović
+    given-names: Veljko
+    affiliation: "Institute for Artificial Intelligence R&D of Serbia; University of New South Wales"
+  - family-names: Kolaković
+    given-names: Slobodan
+    affiliation: "Faculty of Technical Sciences, University of Novi Sad"
+  - family-names: Stojković
+    given-names: Milan
+    affiliation: "Institute for Artificial Intelligence R&D of Serbia; Faculty of Civil Engineering, University of Novi Sad"
+funding:
+  - name: "European Union Horizon Europe ARTIFACT project"
+    grant: "101159480"

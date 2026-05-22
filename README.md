@@ -1,4 +1,4 @@
-# HYDRO-ML-UQ: Machine Learning Workflow for Uncertainty Quantification in Streamflow Forecasting
+# HYDRO-ML-UQ: Uncertainty Quantification Workflow for Machine-Learning-based Streamflow Forecasting
 
 Operational streamflow forecasts are essential for flood preparedness and reservoir management. However, predictive uncertainty is often poorly characterized, limiting the reliability of decisions based on these forecasts. This repository implements an **end-to-end multi-model uncertainty quantification (UQ) framework** for operational streamflow forecasting. Unlike standard approaches that treat uncertainty as a property of the predictive model alone, this framework decomposes and attributes uncertainty across the **entire forecasting workflow**: meteorological forcing choice, feature design, model architecture, hyperparameter optimization (HPO), and training variability.
 
@@ -119,3 +119,18 @@ via `pip install -r requirements.txt`. No separate installation steps are needed
 ## Data Availability
 
 Observed discharge data for the Prijepolje station were obtained from the annual hydrological yearbooks of the Republic Hydrometeorological Service of Serbia (RHMSS). NWP forecast data are available from the TIGGE archive (https://apps.ecmwf.int/datasets/data/tigge/) and the NCAR GFS repository (https://doi.org/10.5065/D65D8PWK).
+
+---
+
+## Citation
+
+If you use this code, please cite the Zenodo archive:
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20346106.svg)](https://doi.org/10.5281/zenodo.20346106)
+
+> Vinokić, L., Dotlić, M., Samac, A., Prodanović, V., Kolaković, S., & Stojković, M. (2026).
+> HYDRO-ML-UQ: Uncertainty Quantification Workflow for Machine-Learning-based Streamflow
+> Forecasting (v1.0.1). Zenodo. https://doi.org/10.5281/zenodo.20346106
+
+A companion paper describing the methodology and results is currently in publication process.
+This section will be updated with the full paper citation upon acceptance.
