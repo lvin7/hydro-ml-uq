@@ -39,7 +39,7 @@ Store large data/model/output folders:
 - `final-models/`  
 - `analysis_out_v4/`  
 - `figures/`  
-- `pred_cache/`, `pred_cache_v4/`  
+- `pred_cache_v4/`  
 
 ---
 
