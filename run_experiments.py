@@ -50,7 +50,7 @@ def main():
     ap.add_argument("--epochs_fast", type=int, default=100)
     ap.add_argument("--epochs_full", type=int, default=500)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--outdir", type=str, default="models") # change to models later
+    ap.add_argument("--outdir", type=str, default="models") # change to final-models later
     ap.add_argument("--horizon", type=int, default=5)
     ap.add_argument("--val_start", type=str, default='2023-01-01')
     ap.add_argument("--test_start", type=str, default='2023-10-01')
