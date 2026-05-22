@@ -70,3 +70,52 @@ Where
 - **Default NWP sources:** ifs, ukmo, gfs, gem  
 - **Default variables:** tp_daily, t2m_raw, sd_raw  
 - **Lead times:** 24, 48, 72, 96, 120 hours
+
+---
+
+## How to Reproduce
+
+Run scripts in the following order. Each step depends on outputs from the previous one.
+
+**Step 1 — Train the model ensemble**
+```bash
+python run_experiments.py
+```
+Trains all pipeline combinations (NWP × features × architecture × HPO × replicates). Writes trained `.keras` models and `tuning_summary.json` files under `final-models/`.
+
+**Step 2 — Run the full pipeline analysis**
+```bash
+python full_pipeline_analysis.py
+```
+Scans trained runs, computes per-model metrics, applies the robustness screen, computes ensemble and probabilistic metrics, and populates the prediction cache. Writes outputs to `analysis_out_v4/tables/`, `analysis_out_v4/plots/`, and `pred_cache_v4/`.
+
+**Step 3 — Generate figures**
+```bash
+python figure2.py
+python figure3.py
+python figure4.py
+python figure5.py
+```
+All figure scripts read from `analysis_out_v4/` and `pred_cache_v4/`. Figures 2, 3, and 5 require the prediction cache to be populated (Step 2 must be run first). Figure 4 reads only from `analysis_out_v4/tables/`. Outputs are written to `figures/`.
+
+> **Practical note for future use:** Based on the conclusions of this study, a
+> single training replicate per pipeline and Bayesian optimization as the sole
+> HPO algorithm are sufficient for most applications. This reduces the full
+> factorial grid (1024 pipelines) to a much smaller ensemble while preserving
+> the most informative uncertainty structure, substantially lowering the
+> computational cost of the framework.
+
+---
+
+## Third-Party Dependencies
+
+`tcn` and `tkan` layer implementations are provided by `keras-tcn` (Remy, 2018;
+based on Bai et al., 2018) and `keras-efficient-kan` (based on Genet & Inzirillo,
+2024) respectively. Both are listed in `requirements.txt` and installed automatically
+via `pip install -r requirements.txt`. No separate installation steps are needed.
+
+---
+
+## Data Availability
+
+Observed discharge data for the Prijepolje station were obtained from the annual hydrological yearbooks of the Republic Hydrometeorological Service of Serbia (RHMSS). NWP forecast data are available from the TIGGE archive (https://apps.ecmwf.int/datasets/data/tigge/) and the NCAR GFS repository (https://doi.org/10.5065/D65D8PWK).

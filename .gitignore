@@ -179,3 +179,15 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Project outputs (large, regeneratable)
+data/
+models/
+final-models/
+analysis_out_v4/
+pred_cache_v4/
+figures/
+*.keras
+*.npy
+*.npz
+*.pkl
